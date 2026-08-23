@@ -1,0 +1,36 @@
+# Version history:
+# 1.2.0 - 2026-08-23 - Prepared for repository-managed distribution, removed the private configuration repository from public defaults, and made the managed repository a required install-time option.
+# 1.1.0 - 2026-08-23 - Added Home Assistant-visible deployment status reporting and reusable dashboard component deployment support.
+version: "1.2.0"
+slug: home_automation_git_deployer
+name: Home Automation Git Deployer
+description: >-
+  Safely deploys selected Home Assistant YAML from a Git repository, detects
+  local drift, rolls back failed validation, publishes deployment status for
+  Home Assistant, and never writes back to the managed configuration repository.
+url: https://github.com/uberswimmer/home-assistant-git-deployer
+arch:
+  - amd64
+  - aarch64
+startup: application
+boot: auto
+init: false
+homeassistant_api: true
+map:
+  - type: homeassistant_config
+    read_only: false
+    path: /homeassistant
+options:
+  repository: null
+  branch: main
+  poll_seconds: 300
+  pushover_service: notify.pushover
+  approved_sensitive_commit: ""
+  bootstrap_base_commit: ""
+schema:
+  repository: str
+  branch: str
+  poll_seconds: int(60,3600)
+  pushover_service: str
+  approved_sensitive_commit: str
+  bootstrap_base_commit: str
