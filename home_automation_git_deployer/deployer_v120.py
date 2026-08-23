@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 # =============================================================================
-# HOME AUTOMATION GIT DEPLOYER 1.2.0
+# HOME AUTOMATION GIT DEPLOYER 1.2.1
 # =============================================================================
 # Version history:
+# 1.2.1 - 2026-08-23 - Added a metadata-only repository-managed update test release with no deployment-logic changes.
 # 1.2.0 - 2026-08-23 - Prepared the deployer for repository-managed Home
 # Assistant distribution and explicitly ignored GitHub workflow metadata.
 # =============================================================================
@@ -13,7 +14,7 @@ import sys
 
 import deployer_v110 as previous
 
-VERSION = "1.2.0"
+VERSION = "1.2.1"
 PREVIOUS_CLASSIFY_PATH = previous.classify_path
 
 

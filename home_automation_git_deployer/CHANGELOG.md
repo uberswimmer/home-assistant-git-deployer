@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.2.1 - 2026-08-23
+
+- Metadata-only repository-managed update test release.
+- No deployment, reconciliation, validation, rollback, path-classification, or status-reporting logic changed from 1.2.0.
+
 ## 1.2.0 - 2026-08-23
 
 - Prepared the Git Deployer for native Home Assistant repository-managed updates.
