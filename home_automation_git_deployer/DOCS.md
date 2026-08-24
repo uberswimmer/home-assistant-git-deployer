@@ -1,5 +1,7 @@
 # Home Automation Git Deployer
 
+<!-- Version history: 1.3.0 - 2026-08-24 - Documented the flattened runtime, automated regression testing, and persistent repository-poll health/alert semantics. -->
+
 This Home Assistant app safely deploys selected YAML files from a Git repository to Home Assistant.
 
 ## Security model
@@ -12,7 +14,7 @@ This Home Assistant app safely deploys selected YAML files from a Git repository
 - `configuration.yaml` changes and managed-file deletions require approval of the exact commit SHA.
 - A rollback copy is created before every deployment.
 - Every deployment must pass Home Assistant's own configuration check.
-- Deployment and validation status is published to `/config/.git_deployer_status.json` for Home Assistant dashboards.
+- Deployment, validation, rollback, and repository-fetch health status is published to `/config/.git_deployer_status.json` for Home Assistant dashboards.
 - The app never restarts Home Assistant and never writes back to the managed configuration repository.
 
 ## Configuration
@@ -65,9 +67,25 @@ If a commit changes `configuration.yaml` or deletes a managed YAML file, deploym
 
 ## Home Assistant status publishing
 
-The app writes a non-secret status document to `/config/.git_deployer_status.json`. It records the most recent successful managed-code deployment, the Home Assistant configuration-check result, rollback validation when applicable, changed managed paths, and whether the successful deployment contains configuration that requires activation.
+The app writes a non-secret status document to `/config/.git_deployer_status.json`. It records the most recent successful managed-code deployment, the Home Assistant configuration-check result, rollback validation when applicable, changed managed paths, whether the successful deployment contains configuration that requires activation, and the health of repository polling.
+
+Repository-health fields include:
+
+- `last_poll_at`: most recent poll attempt.
+- `last_fetch_success_at`: most recent successful fetch from the configured repository.
+- `last_fetch_result`: `success`, `error`, or `unknown`.
+- `last_fetch_error`: most recent repository-access error, truncated to 2000 characters.
+- `fetch_failure_started_at`: beginning of the current continuous repository-access outage, or `0` while healthy.
+
+If repository access fails continuously for 30 minutes, the app sends one Pushover warning. Further failed polls during that same outage do not generate duplicate warnings. If the warning threshold was reached, the first successful repository fetch sends one recovery notification and clears the outage state.
 
 Repository-only commits do not update the last managed-code deployment timestamp. The status document is runtime state and is intentionally not managed by Git.
+
+## Runtime architecture and regression tests
+
+Version 1.3.0 flattened the historical version-wrapper chain into one current `deployer.py`. Git history and `CHANGELOG.md` preserve earlier implementation history; the running add-on no longer imports prior-version Python modules.
+
+The source repository includes standard-library regression tests for the safety behavior that must remain stable, including path classification, target-aware reconciliation, local-drift refusal, non-fast-forward refusal, exact-SHA sensitive approval, repository-only commits, deletion/rollback behavior, validation failure handling, rollback escalation, restart-required classification, and repository-outage alert deduplication/recovery. The private-source publishing workflow runs these tests before publishing the app to the public repository.
 
 ## Activation
 
@@ -75,10 +93,12 @@ The deployer writes and validates files but deliberately does not reload or rest
 
 ## Updating the app
 
-Version 1.2.0 and later are intended to be distributed from the Home Assistant app repository at:
+Version 1.2.0 and later are distributed from the Home Assistant app repository at:
 
 ```text
 https://github.com/uberswimmer/home-assistant-git-deployer
 ```
+
+The private `home-automation-config` repository remains the editable source of truth. Its publishing workflow copies approved Git Deployer source into the public repository automatically after changes reach `main` and the regression tests pass. Do not maintain a separate divergent implementation in the public repository.
 
 Once that repository has been added to the Home Assistant App Store, future versions can be installed through Home Assistant's normal app update interface rather than by copying files into `/addons` manually.

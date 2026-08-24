@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.3.0 - 2026-08-24
+
+- Flattened the previously layered `deployer.py` / `deployer_v103.py` / `deployer_v110.py` / `deployer_v120.py` runtime into one current `deployer.py`; Git history now carries implementation history instead of runtime wrapper modules.
+- Preserves the existing read-only Git access, path allowlisting, forward-only deployment, local-drift blocking, exact-commit sensitive approval, target-aware bootstrap reconciliation, Home Assistant configuration validation, automatic rollback, and manual activation model.
+- Adds `last_poll_at`, `last_fetch_success_at`, `last_fetch_result`, `last_fetch_error`, and `fetch_failure_started_at` to Home Assistant-visible deployer status.
+- Sends one Pushover warning after repository access has failed continuously for 30 minutes, suppresses duplicates during the same outage, and sends one recovery notification after monitoring resumes.
+- Performs one repository fetch per poll cycle instead of the wrapper-era duplicate fetch while preserving deployment semantics.
+- Adds automated regression tests for deployment safety invariants and runs them before the private-source publishing workflow can update the public Home Assistant app repository.
+
 ## 1.2.1 - 2026-08-23
 
 - Metadata-only repository-managed update test release.

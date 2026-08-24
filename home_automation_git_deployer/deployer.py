@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+# =============================================================================
+# HOME AUTOMATION GIT DEPLOYER 1.3.0
+# =============================================================================
+# Version history:
+# 1.3.0 - 2026-08-24 - Flattened the proven v1.2.1 runtime into one deployer, added persistent repository-poll health with delayed deduplicated outage/recovery notifications, and retained all existing deployment safety controls.
+# =============================================================================
+
 import hashlib
 import json
 import logging
@@ -14,6 +21,9 @@ from typing import Any
 
 import requests
 
+VERSION = "1.3.0"
+FETCH_FAILURE_ALERT_SECONDS = 30 * 60
+
 DATA_DIR = Path("/data")
 HA_DIR = Path("/homeassistant")
 REPO_DIR = DATA_DIR / "repository"
@@ -23,6 +33,7 @@ SSH_KEY = SSH_DIR / "id_ed25519"
 KNOWN_HOSTS = SSH_DIR / "known_hosts"
 ROLLBACK_ROOT = DATA_DIR / "rollback"
 OPTIONS_FILE = DATA_DIR / "options.json"
+STATUS_FILE = HA_DIR / ".git_deployer_status.json"
 
 ROOT_ALLOWED = {
     "configuration.yaml",
@@ -33,8 +44,10 @@ ROOT_ALLOWED = {
     "iaq_dashboard.yaml",
     "security_dashboard.yaml",
 }
-IGNORED_PREFIXES = ("docs/", "hubitat/", "local_apps/")
+IGNORED_PREFIXES = ("docs/", "hubitat/", "local_apps/", ".github/")
 IGNORED_EXACT = {"README.md", ".gitignore"}
+EMPTY_YAML_REPRESENTATIONS = {b"", b"[]", b"{}", b"null", b"~"}
+EMPTY_UI_FILES = {"automations.yaml", "scripts.yaml", "scenes.yaml"}
 
 logging.basicConfig(
     level=logging.INFO,
@@ -48,8 +61,14 @@ class DeployError(RuntimeError):
     pass
 
 
-def run(cmd: list[str], *, cwd: Path | None = None, check: bool = True,
-        capture: bool = True, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+def run(
+    cmd: list[str],
+    *,
+    cwd: Path | None = None,
+    check: bool = True,
+    capture: bool = True,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     merged_env = os.environ.copy()
     if env:
         merged_env.update(env)
@@ -76,15 +95,20 @@ def load_json(path: Path, default: Any) -> Any:
 def save_json_atomic(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_suffix(path.suffix + ".tmp")
-    temp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    temp.write_text(
+        json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
     os.replace(temp, path)
 
 
 def load_options() -> dict[str, Any]:
     options = load_json(OPTIONS_FILE, {})
     required = {
-        "repository", "branch", "poll_seconds", "pushover_service",
-        "approved_sensitive_commit"
+        "repository",
+        "branch",
+        "poll_seconds",
+        "pushover_service",
+        "approved_sensitive_commit",
     }
     missing = sorted(required - options.keys())
     if missing:
@@ -100,19 +124,48 @@ def set_state(data: dict[str, Any]) -> None:
     save_json_atomic(STATE_FILE, data)
 
 
+def set_status_state(**updates: Any) -> dict[str, Any]:
+    st = state()
+    st.update(updates)
+    set_state(st)
+    publish_status(st)
+    return st
+
+
 def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def content_matches(path: str, expected: bytes, actual: bytes) -> bool:
+    if expected == actual:
+        return True
+    if path in EMPTY_UI_FILES:
+        return (
+            expected.strip() in EMPTY_YAML_REPRESENTATIONS
+            and actual.strip() in EMPTY_YAML_REPRESENTATIONS
+        )
+    return False
 
 
 def classify_path(path: str) -> str:
     p = PurePosixPath(path)
     if path in ROOT_ALLOWED:
         return "allowed"
-    if len(p.parts) == 1 and p.suffix == ".yaml" and p.name.endswith("_dashboard.yaml"):
+    if (
+        len(p.parts) == 1
+        and p.suffix == ".yaml"
+        and p.name.endswith("_dashboard.yaml")
+    ):
         return "allowed"
-    if len(p.parts) == 2 and p.parts[0] in {"packages", "themes"} and p.suffix == ".yaml":
+    if (
+        len(p.parts) == 2
+        and p.parts[0] in {"packages", "themes", "dashboard_components"}
+        and p.suffix == ".yaml"
+    ):
         return "allowed"
-    if path in IGNORED_EXACT or any(path.startswith(prefix) for prefix in IGNORED_PREFIXES):
+    if path in IGNORED_EXACT or any(
+        path.startswith(prefix) for prefix in IGNORED_PREFIXES
+    ):
         return "ignored"
     return "forbidden"
 
@@ -122,25 +175,47 @@ def managed_local_paths() -> set[str]:
     for name in ROOT_ALLOWED:
         if (HA_DIR / name).exists():
             paths.add(name)
-    for p in HA_DIR.glob("*_dashboard.yaml"):
-        if p.is_file():
-            paths.add(p.name)
-    for folder in ("packages", "themes"):
-        base = HA_DIR / folder
-        if base.exists():
-            for p in base.glob("*.yaml"):
-                if p.is_file():
-                    paths.add(f"{folder}/{p.name}")
+    for path in HA_DIR.glob("*_dashboard.yaml"):
+        if path.is_file():
+            paths.add(path.name)
+    for folder in ("packages", "themes", "dashboard_components"):
+        base_dir = HA_DIR / folder
+        if base_dir.exists():
+            for path in base_dir.glob("*.yaml"):
+                if path.is_file():
+                    paths.add(f"{folder}/{path.name}")
     return paths
+
+
+def restart_required_for_paths(paths: list[str]) -> bool:
+    for path in paths:
+        if path.startswith("dashboard_components/"):
+            continue
+        if path.startswith("themes/"):
+            continue
+        if path.endswith("_dashboard.yaml"):
+            continue
+        return True
+    return False
 
 
 def ensure_ssh_material() -> str:
     SSH_DIR.mkdir(parents=True, exist_ok=True)
     if not SSH_KEY.exists():
-        run([
-            "ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C",
-            "home-assistant-git-deployer", "-f", str(SSH_KEY)
-        ])
+        run(
+            [
+                "ssh-keygen",
+                "-q",
+                "-t",
+                "ed25519",
+                "-N",
+                "",
+                "-C",
+                "home-assistant-git-deployer",
+                "-f",
+                str(SSH_KEY),
+            ]
+        )
         os.chmod(SSH_KEY, 0o600)
         LOG.warning(
             "Generated a new deployment key. Add the public key below to GitHub "
@@ -167,7 +242,10 @@ def git_env() -> dict[str, str]:
 def ensure_repository(repository: str, branch: str) -> str:
     if not REPO_DIR.exists():
         REPO_DIR.parent.mkdir(parents=True, exist_ok=True)
-        run(["git", "clone", "--no-checkout", repository, str(REPO_DIR)], env=git_env())
+        run(
+            ["git", "clone", "--no-checkout", repository, str(REPO_DIR)],
+            env=git_env(),
+        )
     elif not (REPO_DIR / ".git").exists():
         raise DeployError(f"{REPO_DIR} exists but is not a Git repository")
 
@@ -175,9 +253,16 @@ def ensure_repository(repository: str, branch: str) -> str:
         ["git", "remote", "get-url", "origin"], cwd=REPO_DIR
     ).stdout.strip()
     if current_origin != repository:
-        run(["git", "remote", "set-url", "origin", repository], cwd=REPO_DIR)
+        run(
+            ["git", "remote", "set-url", "origin", repository],
+            cwd=REPO_DIR,
+        )
 
-    run(["git", "fetch", "--prune", "origin", branch], cwd=REPO_DIR, env=git_env())
+    run(
+        ["git", "fetch", "--prune", "origin", branch],
+        cwd=REPO_DIR,
+        env=git_env(),
+    )
     return run(
         ["git", "rev-parse", f"origin/{branch}"], cwd=REPO_DIR
     ).stdout.strip()
@@ -202,22 +287,45 @@ def git_allowed_paths(commit: str) -> set[str]:
     return {path for path in listing if classify_path(path) == "allowed"}
 
 
-def initial_reconcile(commit: str) -> tuple[bool, list[str]]:
+def target_file_bytes(target_sha: str | None, path: str) -> bytes | None:
+    if not target_sha:
+        return None
+    return git_file_bytes(target_sha, path)
+
+
+def initial_reconcile(
+    commit: str, target_sha: str | None = None
+) -> tuple[bool, list[str]]:
     repo_paths = git_allowed_paths(commit)
     local_paths = managed_local_paths()
     problems: list[str] = []
 
     for path in sorted(repo_paths | local_paths):
+        local = HA_DIR / path
+        old_data = git_file_bytes(commit, path)
+        target_data = target_file_bytes(target_sha, path)
+
         if path not in repo_paths:
+            if (
+                local.exists()
+                and target_data is not None
+                and content_matches(path, target_data, local.read_bytes())
+            ):
+                continue
             problems.append(f"local-only managed file: {path}")
             continue
-        if path not in local_paths:
+
+        if not local.exists():
             problems.append(f"missing locally: {path}")
             continue
-        expected = git_file_bytes(commit, path)
-        actual = (HA_DIR / path).read_bytes()
-        if expected is None or expected != actual:
-            problems.append(f"content differs: {path}")
+
+        actual = local.read_bytes()
+        if old_data is not None and content_matches(path, old_data, actual):
+            continue
+        if target_data is not None and content_matches(path, target_data, actual):
+            continue
+        problems.append(f"content differs: {path}")
+
     return not problems, problems
 
 
@@ -246,26 +354,42 @@ def diff_name_status(old: str, new: str) -> list[tuple[str, str]]:
     return changes
 
 
-def local_drift(changes: list[tuple[str, str]], old: str) -> list[str]:
+def local_drift(
+    changes: list[tuple[str, str]], old: str, target_sha: str | None = None
+) -> list[str]:
     problems: list[str] = []
-    for _, path in changes:
+
+    for status_code, path in changes:
         if classify_path(path) != "allowed":
             continue
+
         local = HA_DIR / path
         old_data = git_file_bytes(old, path)
-        if old_data is None:
-            if local.exists():
-                problems.append(
-                    f"{path}: exists locally but did not exist in last deployed commit"
-                )
-            continue
+        target_data = target_file_bytes(target_sha, path)
+
         if not local.exists():
+            if old_data is None:
+                continue
+            if status_code == "D" and target_data is None:
+                continue
             problems.append(f"{path}: missing locally")
             continue
-        if local.read_bytes() != old_data:
+
+        actual = local.read_bytes()
+        if old_data is not None and content_matches(path, old_data, actual):
+            continue
+        if target_data is not None and content_matches(path, target_data, actual):
+            continue
+
+        if old_data is None:
             problems.append(
-                f"{path}: local content differs from last deployed commit"
+                f"{path}: exists locally but matches neither the baseline nor target commit"
             )
+        else:
+            problems.append(
+                f"{path}: local content matches neither the baseline nor target commit"
+            )
+
     return problems
 
 
@@ -367,41 +491,235 @@ def notify(
         LOG.error("Unable to send Pushover notification: %s", err)
 
 
+def publish_status(st: dict[str, Any] | None = None) -> None:
+    if st is None:
+        st = state()
+
+    payload = {
+        "deployer_version": VERSION,
+        "last_code_deploy_at": int(st.get("last_code_deploy_at") or 0),
+        "last_code_deploy_sha": str(st.get("last_code_deploy_sha") or ""),
+        "last_validation_at": int(st.get("last_validation_at") or 0),
+        "last_validation_result": str(
+            st.get("last_validation_result") or "unknown"
+        ),
+        "last_validation_errors": str(st.get("last_validation_errors") or "")[:2000],
+        "last_rollback_at": int(st.get("last_rollback_at") or 0),
+        "last_rollback_result": str(
+            st.get("last_rollback_result") or "unknown"
+        ),
+        "last_attempted_sha": str(st.get("last_attempted_sha") or ""),
+        "last_attempted_files": list(st.get("last_attempted_files") or []),
+        "last_changed_files": list(st.get("last_changed_files") or []),
+        "restart_required": bool(st.get("restart_required", False)),
+        "last_status_message": str(st.get("last_status_message") or ""),
+        "last_poll_at": int(st.get("last_poll_at") or 0),
+        "last_fetch_success_at": int(st.get("last_fetch_success_at") or 0),
+        "last_fetch_result": str(st.get("last_fetch_result") or "unknown"),
+        "last_fetch_error": str(st.get("last_fetch_error") or "")[:2000],
+        "fetch_failure_started_at": int(st.get("fetch_failure_started_at") or 0),
+    }
+
+    save_json_atomic(STATUS_FILE, payload)
+    os.chmod(STATUS_FILE, 0o644)
+
+
+def record_fetch_success(options: dict[str, Any], now_ts: int | None = None) -> None:
+    if now_ts is None:
+        now_ts = int(time.time())
+    st = state()
+    was_notified = bool(st.get("fetch_failure_notified", False))
+    st.update(
+        {
+            "last_poll_at": now_ts,
+            "last_fetch_success_at": now_ts,
+            "last_fetch_result": "success",
+            "last_fetch_error": "",
+            "fetch_failure_started_at": 0,
+            "fetch_failure_notified": False,
+        }
+    )
+    set_state(st)
+    publish_status(st)
+    if was_notified:
+        notify(
+            options,
+            "Git deployer repository access restored",
+            "Repository access has recovered and deployment monitoring is active again.",
+        )
+
+
+def record_fetch_failure(
+    options: dict[str, Any], error: Exception | str, now_ts: int | None = None
+) -> None:
+    if now_ts is None:
+        now_ts = int(time.time())
+    st = state()
+    started_at = int(st.get("fetch_failure_started_at") or 0)
+    if started_at <= 0:
+        started_at = now_ts
+    notified = bool(st.get("fetch_failure_notified", False))
+    if isinstance(error, Exception):
+        error_text = str(error).strip() or error.__class__.__name__
+    else:
+        error_text = str(error)
+    st.update(
+        {
+            "last_poll_at": now_ts,
+            "last_fetch_result": "error",
+            "last_fetch_error": error_text,
+            "fetch_failure_started_at": started_at,
+        }
+    )
+    if not notified and now_ts - started_at >= FETCH_FAILURE_ALERT_SECONDS:
+        notify(
+            options,
+            "Git deployer repository access problem",
+            "Repository access has failed continuously for at least 30 minutes. "
+            "No configuration updates can be detected until access recovers. "
+            "Check the Git Deployer app log.",
+            priority=1,
+        )
+        st["fetch_failure_notified"] = True
+    set_state(st)
+    publish_status(st)
+
+
 def prune_rollbacks(keep: int = 5) -> None:
     if not ROLLBACK_ROOT.exists():
         return
     dirs = sorted(
-        (p for p in ROLLBACK_ROOT.iterdir() if p.is_dir()),
-        key=lambda p: p.stat().st_mtime,
+        (path for path in ROLLBACK_ROOT.iterdir() if path.is_dir()),
+        key=lambda path: path.stat().st_mtime,
         reverse=True,
     )
     for old in dirs[keep:]:
         shutil.rmtree(old, ignore_errors=True)
 
 
-def deploy_once(options: dict[str, Any]) -> None:
-    public_key = ensure_ssh_material()
-    repository = str(options["repository"])
-    branch = str(options["branch"])
-
-    try:
-        new_sha = ensure_repository(repository, branch)
-    except subprocess.CalledProcessError as err:
-        LOG.error(
-            "Git access failed. Add this public key to the repository as a "
-            "READ-ONLY deploy key:\n%s",
-            public_key,
-        )
-        stderr = (err.stderr or "").strip()
-        if stderr:
-            LOG.error("Git error: %s", stderr)
-        return
-
+def bootstrap_if_needed(
+    options: dict[str, Any], target_sha: str
+) -> bool:
     st = state()
-    old_sha = st.get("last_deployed_sha")
+    if st.get("last_deployed_sha"):
+        return True
+
+    bootstrap_sha = str(options.get("bootstrap_base_commit", "")).strip()
+    if not bootstrap_sha:
+        return True
+
+    exists = subprocess.run(
+        ["git", "cat-file", "-e", f"{bootstrap_sha}^{{commit}}"],
+        cwd=str(REPO_DIR),
+        check=False,
+        capture_output=True,
+    )
+    if exists.returncode != 0:
+        msg = f"Bootstrap commit does not exist locally: {bootstrap_sha}"
+        LOG.error(msg)
+        marker = "bootstrap-missing:" + bootstrap_sha
+        if st.get("last_notified_problem") != marker:
+            notify(options, "Git deploy bootstrap blocked", msg, priority=1)
+            st["last_notified_problem"] = marker
+            set_state(st)
+        return False
+
+    if not is_ancestor(bootstrap_sha, target_sha):
+        branch = str(options["branch"])
+        msg = (
+            f"Bootstrap commit {bootstrap_sha[:12]} is not an ancestor of "
+            f"current {branch} {target_sha[:12]}"
+        )
+        LOG.error(msg)
+        marker = "bootstrap-ancestor:" + bootstrap_sha + ":" + target_sha
+        if st.get("last_notified_problem") != marker:
+            notify(options, "Git deploy bootstrap blocked", msg, priority=1)
+            st["last_notified_problem"] = marker
+            set_state(st)
+        return False
+
+    matches, problems = initial_reconcile(bootstrap_sha, target_sha)
+    if not matches:
+        LOG.error(
+            "Bootstrap reconciliation against %s failed; no files were changed:\n- %s",
+            bootstrap_sha,
+            "\n- ".join(problems),
+        )
+        key = "bootstrap:" + hashlib.sha256(
+            (bootstrap_sha + "\n" + "\n".join(problems)).encode()
+        ).hexdigest()
+        if st.get("last_notified_problem") != key:
+            notify(
+                options,
+                "Git deployer needs reconciliation",
+                f"Production does not match bootstrap commit {bootstrap_sha[:12]} "
+                "or current target files. No files were changed. Check the app log.",
+                priority=1,
+            )
+            st["last_notified_problem"] = key
+            set_state(st)
+        return False
+
+    st.update(
+        {
+            "last_deployed_sha": bootstrap_sha,
+            "last_success_at": int(time.time()),
+            "initial_reconciled": True,
+            "bootstrap_base_commit": bootstrap_sha,
+            "last_notified_problem": None,
+        }
+    )
+    set_state(st)
+    publish_status(st)
+    LOG.info(
+        "Bootstrap reconciliation succeeded. Production is consistent with baseline %s "
+        "and current target %s; continuing deployment.",
+        bootstrap_sha,
+        target_sha,
+    )
+    notify(
+        options,
+        "Git deployer baseline established",
+        f"Production is consistent with historical baseline {bootstrap_sha[:12]} "
+        f"and current target {target_sha[:12]}. Continuing deployment.",
+    )
+    return True
+
+
+def _set_validation_state(
+    *,
+    result: str,
+    errors: str,
+    message: str,
+    rollback_result: str | None = None,
+) -> dict[str, Any]:
+    now_ts = int(time.time())
+    updates: dict[str, Any] = {
+        "last_validation_at": now_ts,
+        "last_validation_result": result,
+        "last_validation_errors": errors,
+        "last_status_message": message,
+    }
+    if rollback_result is not None:
+        updates["last_rollback_at"] = 0
+        updates["last_rollback_result"] = rollback_result
+    return set_status_state(**updates)
+
+
+def _record_rollback_result(result: str, message: str) -> dict[str, Any]:
+    return set_status_state(
+        last_rollback_at=int(time.time()),
+        last_rollback_result=result,
+        last_status_message=message,
+    )
+
+
+def deploy_once(options: dict[str, Any], new_sha: str) -> None:
+    st = state()
+    old_sha = str(st.get("last_deployed_sha") or "")
 
     if not old_sha:
-        matches, problems = initial_reconcile(new_sha)
+        matches, problems = initial_reconcile(new_sha, new_sha)
         if matches:
             st.update(
                 {
@@ -411,6 +729,7 @@ def deploy_once(options: dict[str, Any]) -> None:
                 }
             )
             set_state(st)
+            publish_status(st)
             LOG.info(
                 "Initial reconciliation succeeded. Baseline commit is %s", new_sha
             )
@@ -437,6 +756,7 @@ def deploy_once(options: dict[str, Any]) -> None:
                 )
                 st["last_notified_problem"] = key
                 set_state(st)
+                publish_status(st)
         return
 
     if old_sha == new_sha:
@@ -452,14 +772,17 @@ def deploy_once(options: dict[str, Any]) -> None:
             notify(options, "Git deploy blocked", msg, priority=1)
             st["last_notified_problem"] = msg
             set_state(st)
+            publish_status(st)
         return
 
     changes = diff_name_status(old_sha, new_sha)
-    allowed = [(s, p) for s, p in changes if classify_path(p) == "allowed"]
+    allowed = [(status, path) for status, path in changes if classify_path(path) == "allowed"]
     forbidden = [
-        (s, p) for s, p in changes if classify_path(p) == "forbidden"
+        (status, path)
+        for status, path in changes
+        if classify_path(path) == "forbidden"
     ]
-    ignored = [(s, p) for s, p in changes if classify_path(p) == "ignored"]
+    ignored = [(status, path) for status, path in changes if classify_path(path) == "ignored"]
 
     LOG.info(
         "New commit %s detected: %d allowed, %d ignored, %d forbidden changes",
@@ -469,16 +792,24 @@ def deploy_once(options: dict[str, Any]) -> None:
         len(forbidden),
     )
 
-    if forbidden:
-        paths = ", ".join(p for _, p in forbidden)
-        msg = (
-            f"Commit {new_sha[:12]} changes non-allowlisted path(s): {paths}"
+    changed_files = [path for _, path in allowed]
+    if changed_files:
+        set_status_state(
+            last_attempted_sha=new_sha,
+            last_attempted_files=changed_files,
+            last_status_message=f"Preparing managed deployment {new_sha[:12]}.",
         )
+        st = state()
+
+    if forbidden:
+        paths = ", ".join(path for _, path in forbidden)
+        msg = f"Commit {new_sha[:12]} changes non-allowlisted path(s): {paths}"
         LOG.error(msg)
         if st.get("last_notified_problem") != msg:
             notify(options, "Git deploy blocked", msg, priority=1)
             st["last_notified_problem"] = msg
             set_state(st)
+            publish_status(st)
         return
 
     if not allowed:
@@ -490,6 +821,7 @@ def deploy_once(options: dict[str, Any]) -> None:
             }
         )
         set_state(st)
+        publish_status(st)
         LOG.info(
             "Commit %s contained repository-only changes; advanced baseline "
             "without touching Home Assistant",
@@ -503,7 +835,7 @@ def deploy_once(options: dict[str, Any]) -> None:
     )
     approved = str(options.get("approved_sensitive_commit", "")).strip()
     if sensitive and approved != new_sha:
-        changed = ", ".join(f"{s}:{p}" for s, p in allowed)
+        changed = ", ".join(f"{status}:{path}" for status, path in allowed)
         msg = (
             f"Commit {new_sha} requires explicit approval because it changes "
             f"configuration.yaml and/or deletes a managed file. Changes: {changed}"
@@ -518,13 +850,12 @@ def deploy_once(options: dict[str, Any]) -> None:
             )
             st["last_notified_problem"] = msg
             set_state(st)
+            publish_status(st)
         return
 
-    drift = local_drift(allowed, old_sha)
+    drift = local_drift(allowed, old_sha, new_sha)
     if drift:
-        msg = (
-            f"Local drift blocks commit {new_sha[:12]}: " + "; ".join(drift)
-        )
+        msg = f"Local drift blocks commit {new_sha[:12]}: " + "; ".join(drift)
         LOG.error(msg)
         if st.get("last_notified_problem") != msg:
             notify(
@@ -536,12 +867,52 @@ def deploy_once(options: dict[str, Any]) -> None:
             )
             st["last_notified_problem"] = msg
             set_state(st)
+            publish_status(st)
         return
 
     backup_root = backup_changes(allowed, new_sha)
+    validation_result = ""
+    validation_errors = ""
     try:
-        apply_changes(allowed, new_sha)
-        valid, errors = check_config()
+        try:
+            apply_changes(allowed, new_sha)
+        except Exception as err:
+            validation_result = "error"
+            validation_errors = f"File deployment failed: {err}"
+            _set_validation_state(
+                result=validation_result,
+                errors=validation_errors,
+                message=f"Deployment {new_sha[:12]} failed while applying files.",
+                rollback_result="pending",
+            )
+            raise
+
+        try:
+            valid, errors = check_config()
+        except Exception as err:
+            validation_result = "error"
+            validation_errors = str(err)
+            _set_validation_state(
+                result=validation_result,
+                errors=validation_errors,
+                message=(
+                    f"Deployment {new_sha[:12]} configuration check raised an error."
+                ),
+                rollback_result="pending",
+            )
+            raise
+
+        validation_result = "valid" if valid else "invalid"
+        validation_errors = errors
+        _set_validation_state(
+            result=validation_result,
+            errors=validation_errors,
+            message=(
+                f"Deployment {new_sha[:12]} configuration validation "
+                f"{'passed' if valid else 'failed'}."
+            ),
+            rollback_result="not_needed" if valid else "pending",
+        )
         if not valid:
             raise DeployError(
                 f"Home Assistant configuration check failed: {errors}"
@@ -551,8 +922,20 @@ def deploy_once(options: dict[str, Any]) -> None:
         rollback(backup_root)
         try:
             rollback_valid, rollback_errors = check_config()
+            rollback_result = "valid" if rollback_valid else "invalid"
         except Exception as check_err:
-            rollback_valid, rollback_errors = False, str(check_err)
+            rollback_valid = False
+            rollback_errors = str(check_err)
+            rollback_result = "error"
+
+        _record_rollback_result(
+            rollback_result,
+            (
+                f"Rollback after {new_sha[:12]} configuration validation "
+                f"{'passed' if rollback_valid else 'failed'}."
+            ),
+        )
+
         if rollback_valid:
             LOG.info("Rollback configuration check passed")
             notify(
@@ -576,16 +959,28 @@ def deploy_once(options: dict[str, Any]) -> None:
             )
         return
 
+    st = state()
+    deployed_at = int(time.time())
     st.update(
         {
             "last_deployed_sha": new_sha,
-            "last_success_at": int(time.time()),
+            "last_success_at": deployed_at,
             "last_notified_problem": None,
+            "last_code_deploy_at": deployed_at,
+            "last_code_deploy_sha": new_sha,
+            "last_changed_files": changed_files,
+            "restart_required": restart_required_for_paths(changed_files),
+            "last_rollback_at": 0,
+            "last_rollback_result": "not_needed",
+            "last_status_message": (
+                f"Deployment {new_sha[:12]} passed configuration validation."
+            ),
         }
     )
     set_state(st)
+    publish_status(st)
     prune_rollbacks()
-    changed_names = ", ".join(path for _, path in allowed)
+    changed_names = ", ".join(changed_files)
     LOG.info(
         "Deployment %s passed Home Assistant configuration validation", new_sha
     )
@@ -597,18 +992,57 @@ def deploy_once(options: dict[str, Any]) -> None:
     )
 
 
+def poll_target(options: dict[str, Any]) -> str | None:
+    repository = str(options["repository"])
+    branch = str(options["branch"])
+    poll_at = int(time.time())
+    set_status_state(last_poll_at=poll_at)
+
+    public_key = ""
+    try:
+        public_key = ensure_ssh_material()
+        target_sha = ensure_repository(repository, branch)
+    except subprocess.CalledProcessError as err:
+        LOG.error(
+            "Git access failed. Add this public key to the repository as a "
+            "READ-ONLY deploy key:\n%s",
+            public_key or "(public key unavailable)",
+        )
+        stderr = (err.stderr or "").strip()
+        if stderr:
+            LOG.error("Git error: %s", stderr)
+        record_fetch_failure(options, stderr or err, poll_at)
+        return None
+    except Exception as err:
+        LOG.error("Git repository poll failed: %s", err)
+        record_fetch_failure(options, err, poll_at)
+        return None
+
+    record_fetch_success(options, int(time.time()))
+    return target_sha
+
+
 def main() -> int:
-    LOG.info("Home Automation Git Deployer 1.0.0 starting")
+    publish_status()
+    LOG.info("Home Automation Git Deployer %s starting", VERSION)
+
     while True:
         try:
             options = load_options()
-            deploy_once(options)
+            target_sha = poll_target(options)
+            if target_sha and bootstrap_if_needed(options, target_sha):
+                deploy_once(options, target_sha)
             delay = max(60, int(options.get("poll_seconds", 300)))
         except KeyboardInterrupt:
             return 0
         except Exception:
             LOG.exception("Unhandled deployer error")
+            try:
+                publish_status()
+            except Exception:
+                LOG.exception("Unable to publish deployer status")
             delay = 60
+
         time.sleep(delay)
 
 
