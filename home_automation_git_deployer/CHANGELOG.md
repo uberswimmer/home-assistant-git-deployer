@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.1 - 2026-08-27
+
+- Sensitive-commit approval notifications now include the full 40-character target commit SHA on its own copyable line.
+- Preserves exact-commit approval semantics and all existing deployment, validation, rollback, drift-protection, and repository-health behavior.
+- Adds regression coverage to ensure approval notifications continue to expose the complete target SHA.
+
 ## 1.3.0 - 2026-08-24
 
 - Flattened the previously layered `deployer.py` / `deployer_v103.py` / `deployer_v110.py` / `deployer_v120.py` runtime into one current `deployer.py`; Git history now carries implementation history instead of runtime wrapper modules.
