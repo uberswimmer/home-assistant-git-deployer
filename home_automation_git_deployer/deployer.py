@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 # =============================================================================
-# HOME AUTOMATION GIT DEPLOYER 1.3.0
+# HOME AUTOMATION GIT DEPLOYER 1.3.1
 # =============================================================================
 # Version history:
+# 1.3.1 - 2026-08-27 - Included the full target commit SHA in sensitive-approval notifications so the exact approval value is directly available to copy.
 # 1.3.0 - 2026-08-24 - Flattened the proven v1.2.1 runtime into one deployer, added persistent repository-poll health with delayed deduplicated outage/recovery notifications, and retained all existing deployment safety controls.
 # =============================================================================
 
@@ -21,7 +22,7 @@ from typing import Any
 
 import requests
 
-VERSION = "1.3.0"
+VERSION = "1.3.1"
 FETCH_FAILURE_ALERT_SECONDS = 30 * 60
 
 DATA_DIR = Path("/data")
@@ -845,8 +846,10 @@ def deploy_once(options: dict[str, Any], new_sha: str) -> None:
             notify(
                 options,
                 "Git deploy approval required",
-                f"Commit {new_sha[:12]} is pending. Paste the full SHA into "
-                "approved_sensitive_commit to authorize this exact commit.",
+                "Sensitive commit pending.\n"
+                f"Full SHA: {new_sha}\n"
+                "Paste this full SHA into approved_sensitive_commit to authorize "
+                "this exact commit.",
             )
             st["last_notified_problem"] = msg
             set_state(st)
