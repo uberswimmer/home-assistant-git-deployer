@@ -1,5 +1,6 @@
 # Home Automation Git Deployer
 
+<!-- Version history: 1.3.1 - 2026-08-27 - Clarified sensitive-approval guidance for the full copyable target SHA included in Pushover notifications. -->
 <!-- Version history: 1.3.0 - 2026-08-24 - Documented the flattened runtime, automated regression testing, and persistent repository-poll health/alert semantics. -->
 
 This Home Assistant app safely deploys selected YAML files from a Git repository to Home Assistant.
@@ -63,7 +64,7 @@ Repository metadata and development content under `docs/`, `hubitat/`, `local_ap
 
 ## Sensitive commit approval
 
-If a commit changes `configuration.yaml` or deletes a managed YAML file, deployment pauses. The notification and log include the full commit SHA. Paste that full SHA into `approved_sensitive_commit` in the app configuration. Only that exact commit is authorized. A later sensitive commit requires its own approval.
+If a commit changes `configuration.yaml` or deletes a managed YAML file, deployment pauses. The Pushover notification and app log include the full 40-character commit SHA; the notification places it on a separate `Full SHA:` line for easy copying. Paste that full SHA into `approved_sensitive_commit` in the app configuration. Only that exact commit is authorized. A later sensitive commit requires its own approval.
 
 ## Home Assistant status publishing
 
@@ -85,7 +86,7 @@ Repository-only commits do not update the last managed-code deployment timestamp
 
 Version 1.3.0 flattened the historical version-wrapper chain into one current `deployer.py`. Git history and `CHANGELOG.md` preserve earlier implementation history; the running add-on no longer imports prior-version Python modules.
 
-The source repository includes standard-library regression tests for the safety behavior that must remain stable, including path classification, target-aware reconciliation, local-drift refusal, non-fast-forward refusal, exact-SHA sensitive approval, repository-only commits, deletion/rollback behavior, validation failure handling, rollback escalation, restart-required classification, and repository-outage alert deduplication/recovery. The private-source publishing workflow runs these tests before publishing the app to the public repository.
+The source repository includes standard-library regression tests for the safety behavior that must remain stable, including path classification, target-aware reconciliation, local-drift refusal, non-fast-forward refusal, exact-SHA sensitive approval, repository-only commits, deletion/rollback behavior, validation failure handling, rollback escalation, restart-required classification, and repository-outage alert deduplication/recovery. Version 1.3.1 also verifies that sensitive-approval notifications expose the complete target SHA. The private-source publishing workflow runs these tests before publishing the app to the public repository.
 
 ## Activation
 
