@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 # =============================================================================
-# HOME AUTOMATION GIT DEPLOYER 1.3.1
+# HOME AUTOMATION GIT DEPLOYER 1.3.2
 # =============================================================================
 # Version history:
+# 1.3.2 - 2026-08-29 - Latched restart-requiring deployments across later dashboard-only commits and made rollback filesystem failures publish critical state with persistent notification fallback.
 # 1.3.1 - 2026-08-27 - Included the full target commit SHA in sensitive-approval notifications so the exact approval value is directly available to copy.
 # 1.3.0 - 2026-08-24 - Flattened the proven v1.2.1 runtime into one deployer, added persistent repository-poll health with delayed deduplicated outage/recovery notifications, and retained all existing deployment safety controls.
 # =============================================================================
@@ -22,7 +23,7 @@ from typing import Any
 
 import requests
 
-VERSION = "1.3.1"
+VERSION = "1.3.2"
 FETCH_FAILURE_ALERT_SECONDS = 30 * 60
 
 DATA_DIR = Path("/data")
@@ -130,6 +131,28 @@ def set_status_state(**updates: Any) -> dict[str, Any]:
     st.update(updates)
     set_state(st)
     publish_status(st)
+    return st
+
+
+def migrate_restart_latch(st: dict[str, Any]) -> dict[str, Any]:
+    if int(st.get("last_restart_required_deploy_at") or 0) > 0:
+        return st
+    if not bool(st.get("restart_required", False)):
+        return st
+
+    deploy_at = int(st.get("last_code_deploy_at") or 0)
+    if deploy_at <= 0:
+        return st
+
+    st.update(
+        {
+            "last_restart_required_deploy_at": deploy_at,
+            "last_restart_required_deploy_sha": str(
+                st.get("last_code_deploy_sha") or ""
+            ),
+        }
+    )
+    set_state(st)
     return st
 
 
@@ -492,6 +515,22 @@ def notify(
         LOG.error("Unable to send Pushover notification: %s", err)
 
 
+def persistent_notification(title: str, message: str, notification_id: str) -> None:
+    url = "http://supervisor/core/api/services/persistent_notification/create"
+    payload = {
+        "title": title,
+        "message": message,
+        "notification_id": notification_id,
+    }
+    try:
+        response = requests.post(
+            url, headers=ha_headers(), json=payload, timeout=30
+        )
+        response.raise_for_status()
+    except Exception as err:
+        LOG.error("Unable to create persistent notification: %s", err)
+
+
 def publish_status(st: dict[str, Any] | None = None) -> None:
     if st is None:
         st = state()
@@ -500,6 +539,12 @@ def publish_status(st: dict[str, Any] | None = None) -> None:
         "deployer_version": VERSION,
         "last_code_deploy_at": int(st.get("last_code_deploy_at") or 0),
         "last_code_deploy_sha": str(st.get("last_code_deploy_sha") or ""),
+        "last_restart_required_deploy_at": int(
+            st.get("last_restart_required_deploy_at") or 0
+        ),
+        "last_restart_required_deploy_sha": str(
+            st.get("last_restart_required_deploy_sha") or ""
+        ),
         "last_validation_at": int(st.get("last_validation_at") or 0),
         "last_validation_result": str(
             st.get("last_validation_result") or "unknown"
@@ -509,6 +554,7 @@ def publish_status(st: dict[str, Any] | None = None) -> None:
         "last_rollback_result": str(
             st.get("last_rollback_result") or "unknown"
         ),
+        "last_rollback_errors": str(st.get("last_rollback_errors") or "")[:2000],
         "last_attempted_sha": str(st.get("last_attempted_sha") or ""),
         "last_attempted_files": list(st.get("last_attempted_files") or []),
         "last_changed_files": list(st.get("last_changed_files") or []),
@@ -707,16 +753,19 @@ def _set_validation_state(
     return set_status_state(**updates)
 
 
-def _record_rollback_result(result: str, message: str) -> dict[str, Any]:
+def _record_rollback_result(
+    result: str, message: str, *, errors: str = ""
+) -> dict[str, Any]:
     return set_status_state(
         last_rollback_at=int(time.time()),
         last_rollback_result=result,
+        last_rollback_errors=errors,
         last_status_message=message,
     )
 
 
 def deploy_once(options: dict[str, Any], new_sha: str) -> None:
-    st = state()
+    st = migrate_restart_latch(state())
     old_sha = str(st.get("last_deployed_sha") or "")
 
     if not old_sha:
@@ -922,7 +971,34 @@ def deploy_once(options: dict[str, Any], new_sha: str) -> None:
             )
     except Exception as err:
         LOG.error("Deployment %s failed: %s", new_sha, err)
-        rollback(backup_root)
+        try:
+            rollback(backup_root)
+        except Exception as rollback_err:
+            rollback_errors = f"Filesystem rollback failed: {rollback_err}"
+            _record_rollback_result(
+                "error",
+                f"Rollback after {new_sha[:12]} raised a filesystem error.",
+                errors=rollback_errors,
+            )
+            critical_message = (
+                f"Commit {new_sha[:12]} failed and filesystem rollback also "
+                f"failed. Manual intervention is required. Deployment error: "
+                f"{err}. Rollback error: {rollback_err}"
+            )
+            LOG.critical("%s", critical_message)
+            notify(
+                options,
+                "Git deploy CRITICAL",
+                critical_message,
+                priority=1,
+            )
+            persistent_notification(
+                "Git deploy CRITICAL",
+                critical_message,
+                "git_deployer_critical",
+            )
+            return
+
         try:
             rollback_valid, rollback_errors = check_config()
             rollback_result = "valid" if rollback_valid else "invalid"
@@ -937,6 +1013,7 @@ def deploy_once(options: dict[str, Any], new_sha: str) -> None:
                 f"Rollback after {new_sha[:12]} configuration validation "
                 f"{'passed' if rollback_valid else 'failed'}."
             ),
+            errors=rollback_errors,
         )
 
         if rollback_valid:
@@ -960,10 +1037,18 @@ def deploy_once(options: dict[str, Any], new_sha: str) -> None:
                 f"{rollback_errors}",
                 priority=1,
             )
+            persistent_notification(
+                "Git deploy CRITICAL",
+                f"Commit {new_sha[:12]} failed and rollback validation also "
+                f"failed. Manual intervention is required. Deployment error: "
+                f"{err}. Rollback validation error: {rollback_errors}",
+                "git_deployer_critical",
+            )
         return
 
     st = state()
     deployed_at = int(time.time())
+    restart_required = restart_required_for_paths(changed_files)
     st.update(
         {
             "last_deployed_sha": new_sha,
@@ -972,14 +1057,24 @@ def deploy_once(options: dict[str, Any], new_sha: str) -> None:
             "last_code_deploy_at": deployed_at,
             "last_code_deploy_sha": new_sha,
             "last_changed_files": changed_files,
-            "restart_required": restart_required_for_paths(changed_files),
             "last_rollback_at": 0,
             "last_rollback_result": "not_needed",
+            "last_rollback_errors": "",
             "last_status_message": (
                 f"Deployment {new_sha[:12]} passed configuration validation."
             ),
         }
     )
+    if restart_required:
+        st.update(
+            {
+                "restart_required": True,
+                "last_restart_required_deploy_at": deployed_at,
+                "last_restart_required_deploy_sha": new_sha,
+            }
+        )
+    else:
+        st.setdefault("restart_required", False)
     set_state(st)
     publish_status(st)
     prune_rollbacks()
@@ -1026,7 +1121,7 @@ def poll_target(options: dict[str, Any]) -> str | None:
 
 
 def main() -> int:
-    publish_status()
+    publish_status(migrate_restart_latch(state()))
     LOG.info("Home Automation Git Deployer %s starting", VERSION)
 
     while True:

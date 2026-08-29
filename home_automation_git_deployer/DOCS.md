@@ -1,5 +1,6 @@
 # Home Automation Git Deployer
 
+<!-- Version history: 1.3.2 - 2026-08-29 - Documented latched restart tracking and critical rollback-filesystem failure reporting with persistent notification fallback. -->
 <!-- Version history: 1.3.1 - 2026-08-27 - Clarified sensitive-approval guidance for the full copyable target SHA included in Pushover notifications. -->
 <!-- Version history: 1.3.0 - 2026-08-24 - Documented the flattened runtime, automated regression testing, and persistent repository-poll health/alert semantics. -->
 
@@ -13,7 +14,8 @@ This Home Assistant app safely deploys selected YAML files from a Git repository
 - Only explicitly allowlisted Home Assistant YAML paths can be written.
 - Local drift blocks deployment rather than being overwritten.
 - `configuration.yaml` changes and managed-file deletions require approval of the exact commit SHA.
-- A rollback copy is created before every deployment.
+- A rollback copy is created before every deployment, and rollback filesystem
+  failures are recorded as a distinct critical state.
 - Every deployment must pass Home Assistant's own configuration check.
 - Deployment, validation, rollback, and repository-fetch health status is published to `/config/.git_deployer_status.json` for Home Assistant dashboards.
 - The app never restarts Home Assistant and never writes back to the managed configuration repository.
@@ -82,11 +84,25 @@ If repository access fails continuously for 30 minutes, the app sends one Pushov
 
 Repository-only commits do not update the last managed-code deployment timestamp. The status document is runtime state and is intentionally not managed by Git.
 
+The restart-required timestamp and SHA are latched only when a successful
+deployment changes a restart-requiring path. A later dashboard-only, theme-only,
+or dashboard-component-only deployment does not overwrite that latch. Home
+Assistant compares the latched timestamp with its recorded startup time, so the
+pending state clears only after Home Assistant has actually restarted. On the
+first version 1.3.2 start, an existing version 1.3.1 pending-restart state is
+migrated from its recorded managed-code deployment timestamp and SHA.
+
+If filesystem restoration itself raises an exception, the app records
+`last_rollback_result: error` and preserves the rollback exception separately in
+`last_rollback_errors`. It attempts both a priority Pushover notification and a
+local Home Assistant persistent notification so a Pushover outage cannot hide
+the critical mixed-version condition.
+
 ## Runtime architecture and regression tests
 
 Version 1.3.0 flattened the historical version-wrapper chain into one current `deployer.py`. Git history and `CHANGELOG.md` preserve earlier implementation history; the running add-on no longer imports prior-version Python modules.
 
-The source repository includes standard-library regression tests for the safety behavior that must remain stable, including path classification, target-aware reconciliation, local-drift refusal, non-fast-forward refusal, exact-SHA sensitive approval, repository-only commits, deletion/rollback behavior, validation failure handling, rollback escalation, restart-required classification, and repository-outage alert deduplication/recovery. Version 1.3.1 also verifies that sensitive-approval notifications expose the complete target SHA. The private-source publishing workflow runs these tests before publishing the app to the public repository.
+The source repository includes standard-library regression tests for the safety behavior that must remain stable, including path classification, target-aware reconciliation, local-drift refusal, non-fast-forward refusal, exact-SHA sensitive approval, repository-only commits, deletion/rollback behavior, validation failure handling, rollback escalation, restart-required classification, and repository-outage alert deduplication/recovery. Version 1.3.1 also verifies that sensitive-approval notifications expose the complete target SHA. Version 1.3.2 adds coverage for restart-latch preservation and rollback manifest-read, copy, unlink, and escalation failures. The private-source publishing workflow runs these tests before publishing the app to the public repository.
 
 ## Activation
 

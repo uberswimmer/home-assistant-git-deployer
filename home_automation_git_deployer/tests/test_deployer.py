@@ -2,6 +2,7 @@
 # HOME AUTOMATION GIT DEPLOYER REGRESSION TESTS
 # =============================================================================
 # Version history:
+# 1.1.0 - 2026-08-29 - Added regression coverage for latched restart requirements and rollback filesystem exceptions, including manifest-read, copy, and unlink failures.
 # 1.0.0 - 2026-08-24 - Added regression coverage for the v1.3.0 flattened deployer safety invariants, rollback behavior, reconciliation, and repository-health alerting.
 # =============================================================================
 
@@ -212,6 +213,55 @@ class GitDeployerTests(unittest.TestCase):
         deployer.rollback(backup)
         self.assertEqual(target.read_text(encoding="utf-8"), "old\n")
 
+    def test_rollback_manifest_read_failure_is_raised(self) -> None:
+        backup = self.rollback_root / "newsha"
+        backup.mkdir(parents=True)
+        (backup / "manifest.json").write_text("not json\n", encoding="utf-8")
+
+        with self.assertRaises(deployer.DeployError):
+            deployer.rollback(backup)
+
+    def test_rollback_copy_failure_is_raised(self) -> None:
+        backup = self.rollback_root / "newsha"
+        source = backup / "files" / "packages" / "a.yaml"
+        source.parent.mkdir(parents=True)
+        source.write_text("old\n", encoding="utf-8")
+        (backup / "manifest.json").write_text(
+            '{"files": {"packages/a.yaml": {"existed": true}}}\n',
+            encoding="utf-8",
+        )
+
+        with (
+            mock.patch.object(
+                deployer.shutil,
+                "copy2",
+                side_effect=OSError("filesystem read-only"),
+            ),
+            self.assertRaises(OSError),
+        ):
+            deployer.rollback(backup)
+
+    def test_rollback_unlink_failure_is_raised(self) -> None:
+        backup = self.rollback_root / "newsha"
+        backup.mkdir(parents=True)
+        (backup / "manifest.json").write_text(
+            '{"files": {"packages/a.yaml": {"existed": false}}}\n',
+            encoding="utf-8",
+        )
+        target = self.ha_dir / "packages" / "a.yaml"
+        target.parent.mkdir(parents=True)
+        target.write_text("new\n", encoding="utf-8")
+
+        with (
+            mock.patch.object(
+                Path,
+                "unlink",
+                side_effect=OSError("filesystem read-only"),
+            ),
+            self.assertRaises(OSError),
+        ):
+            deployer.rollback(backup)
+
     def test_failed_validation_rolls_back_and_records_valid_rollback(self) -> None:
         self.seed_state()
         changes = [("M", "packages/a.yaml")]
@@ -254,11 +304,47 @@ class GitDeployerTests(unittest.TestCase):
             mock.patch.object(deployer, "check_config", side_effect=[(False, "bad"), (False, "still bad")]),
             mock.patch.object(deployer, "rollback"),
             mock.patch.object(deployer, "notify") as notify_mock,
+            mock.patch.object(deployer, "persistent_notification") as persistent_mock,
         ):
             deployer.deploy_once(self.options, "newsha")
 
         self.assertEqual(deployer.state()["last_rollback_result"], "invalid")
+        self.assertEqual(deployer.state()["last_rollback_errors"], "still bad")
         self.assertEqual(notify_mock.call_args.args[1], "Git deploy CRITICAL")
+        persistent_mock.assert_called_once()
+
+    def test_rollback_exception_records_error_and_escalates(self) -> None:
+        self.seed_state()
+        changes = [("M", "packages/a.yaml")]
+        backup = self.rollback_root / "newsha"
+        backup.mkdir(parents=True)
+
+        with (
+            mock.patch.object(deployer, "is_ancestor", return_value=True),
+            mock.patch.object(deployer, "diff_name_status", return_value=changes),
+            mock.patch.object(deployer, "local_drift", return_value=[]),
+            mock.patch.object(deployer, "backup_changes", return_value=backup),
+            mock.patch.object(deployer, "apply_changes"),
+            mock.patch.object(deployer, "check_config", return_value=(False, "bad yaml")) as check_mock,
+            mock.patch.object(
+                deployer,
+                "rollback",
+                side_effect=OSError("filesystem read-only"),
+            ),
+            mock.patch.object(deployer, "notify") as notify_mock,
+            mock.patch.object(deployer, "persistent_notification") as persistent_mock,
+        ):
+            deployer.deploy_once(self.options, "newsha")
+
+        state = deployer.state()
+        self.assertEqual(state["last_deployed_sha"], "oldsha")
+        self.assertEqual(state["last_validation_result"], "invalid")
+        self.assertEqual(state["last_validation_errors"], "bad yaml")
+        self.assertEqual(state["last_rollback_result"], "error")
+        self.assertIn("filesystem read-only", state["last_rollback_errors"])
+        self.assertEqual(check_mock.call_count, 1)
+        self.assertEqual(notify_mock.call_args.args[1], "Git deploy CRITICAL")
+        persistent_mock.assert_called_once()
 
     def test_successful_managed_deployment_records_code_status(self) -> None:
         self.seed_state()
@@ -284,6 +370,36 @@ class GitDeployerTests(unittest.TestCase):
         self.assertEqual(state["last_code_deploy_sha"], "newsha")
         self.assertEqual(state["last_validation_result"], "valid")
         self.assertTrue(state["restart_required"])
+        self.assertGreater(state["last_restart_required_deploy_at"], 0)
+        self.assertEqual(state["last_restart_required_deploy_sha"], "newsha")
+
+    def test_dashboard_only_deployment_migrates_and_preserves_restart_latch(self) -> None:
+        self.seed_state(
+            restart_required=True,
+            last_code_deploy_at=123,
+            last_code_deploy_sha="package-sha",
+        )
+        changes = [("M", "iaq_dashboard.yaml")]
+        backup = self.rollback_root / "newsha"
+        backup.mkdir(parents=True)
+
+        with (
+            mock.patch.object(deployer, "is_ancestor", return_value=True),
+            mock.patch.object(deployer, "diff_name_status", return_value=changes),
+            mock.patch.object(deployer, "local_drift", return_value=[]),
+            mock.patch.object(deployer, "backup_changes", return_value=backup),
+            mock.patch.object(deployer, "apply_changes"),
+            mock.patch.object(deployer, "check_config", return_value=(True, "")),
+            mock.patch.object(deployer, "prune_rollbacks"),
+            mock.patch.object(deployer, "notify"),
+        ):
+            deployer.deploy_once(self.options, "newsha")
+
+        state = deployer.state()
+        self.assertEqual(state["last_code_deploy_sha"], "newsha")
+        self.assertTrue(state["restart_required"])
+        self.assertEqual(state["last_restart_required_deploy_at"], 123)
+        self.assertEqual(state["last_restart_required_deploy_sha"], "package-sha")
 
     def test_bootstrap_success_establishes_historical_baseline(self) -> None:
         self.options["bootstrap_base_commit"] = "basesha"

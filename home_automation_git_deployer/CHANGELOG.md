@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.3.2 - 2026-08-29
+
+- Latches the timestamp and SHA of the most recent successful restart-requiring deployment so later dashboard-only, theme-only, or dashboard-component-only deployments cannot conceal a still-pending Home Assistant restart, including migration of the prior version's pending-restart state.
+- Records filesystem rollback exceptions as `last_rollback_result: error` and preserves the filesystem error separately from the original deployment validation error.
+- Attempts both priority Pushover and Home Assistant persistent notifications when rollback restoration or rollback validation fails critically.
+- Adds regression coverage for restart-latch preservation and rollback manifest-read, copy, unlink, and critical escalation failures.
+
 ## 1.3.1 - 2026-08-27
 
 - Sensitive-commit approval notifications now include the full 40-character target commit SHA on its own copyable line.
