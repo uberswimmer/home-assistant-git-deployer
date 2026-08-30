@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 # =============================================================================
-# HOME AUTOMATION GIT DEPLOYER 1.3.2
+# HOME AUTOMATION GIT DEPLOYER 1.3.3
 # =============================================================================
 # Version history:
+# 1.3.3 - 2026-08-29 - Made problem-alert deduplication contingent on confirmed Pushover service success, added bounded retry and persistent fallback, and published delivery health.
 # 1.3.2 - 2026-08-29 - Latched restart-requiring deployments across later dashboard-only commits and made rollback filesystem failures publish critical state with persistent notification fallback.
 # 1.3.1 - 2026-08-27 - Included the full target commit SHA in sensitive-approval notifications so the exact approval value is directly available to copy.
 # 1.3.0 - 2026-08-24 - Flattened the proven v1.2.1 runtime into one deployer, added persistent repository-poll health with delayed deduplicated outage/recovery notifications, and retained all existing deployment safety controls.
@@ -23,8 +24,10 @@ from typing import Any
 
 import requests
 
-VERSION = "1.3.2"
+VERSION = "1.3.3"
 FETCH_FAILURE_ALERT_SECONDS = 30 * 60
+NOTIFICATION_RETRY_SECONDS = 15 * 60
+NOTIFICATION_FALLBACK_ID = "git_deployer_notification_delivery_failed"
 
 DATA_DIR = Path("/data")
 HA_DIR = Path("/homeassistant")
@@ -492,13 +495,13 @@ def check_config() -> tuple[bool, str]:
 
 def notify(
     options: dict[str, Any], title: str, message: str, *, priority: int = 0
-) -> None:
+) -> bool:
     service = str(options.get("pushover_service", "notify.pushover"))
     if "." not in service:
         LOG.warning(
             "Invalid Pushover service name %r; expected notify.pushover", service
         )
-        return
+        return False
     domain, service_name = service.split(".", 1)
     url = f"http://supervisor/core/api/services/{domain}/{service_name}"
     payload = {
@@ -511,11 +514,13 @@ def notify(
             url, headers=ha_headers(), json=payload, timeout=30
         )
         response.raise_for_status()
+        return True
     except Exception as err:
         LOG.error("Unable to send Pushover notification: %s", err)
+        return False
 
 
-def persistent_notification(title: str, message: str, notification_id: str) -> None:
+def persistent_notification(title: str, message: str, notification_id: str) -> bool:
     url = "http://supervisor/core/api/services/persistent_notification/create"
     payload = {
         "title": title,
@@ -527,8 +532,156 @@ def persistent_notification(title: str, message: str, notification_id: str) -> N
             url, headers=ha_headers(), json=payload, timeout=30
         )
         response.raise_for_status()
+        return True
     except Exception as err:
         LOG.error("Unable to create persistent notification: %s", err)
+        return False
+
+
+def dismiss_persistent_notification(notification_id: str) -> bool:
+    url = "http://supervisor/core/api/services/persistent_notification/dismiss"
+    payload = {"notification_id": notification_id}
+    try:
+        response = requests.post(
+            url, headers=ha_headers(), json=payload, timeout=30
+        )
+        response.raise_for_status()
+        return True
+    except Exception as err:
+        LOG.error("Unable to dismiss persistent notification: %s", err)
+        return False
+
+
+def _record_notification_attempt(
+    st: dict[str, Any],
+    *,
+    title: str,
+    success: bool,
+    now_ts: int,
+    error: str = "",
+) -> None:
+    st.update(
+        {
+            "last_notification_at": now_ts,
+            "last_notification_result": "success" if success else "error",
+            "last_notification_title": title,
+            "last_notification_error": "" if success else error,
+        }
+    )
+
+
+def send_notification(
+    options: dict[str, Any],
+    title: str,
+    message: str,
+    *,
+    priority: int = 0,
+    now_ts: int | None = None,
+) -> bool:
+    if now_ts is None:
+        now_ts = int(time.time())
+    st = state()
+    had_delivery_failure = st.get("last_notification_result") == "error"
+    success = bool(notify(options, title, message, priority=priority))
+    _record_notification_attempt(
+        st,
+        title=title,
+        success=success,
+        now_ts=now_ts,
+        error="Pushover service call failed; see the Git Deployer app log.",
+    )
+    set_state(st)
+    publish_status(st)
+    if success:
+        if (
+            had_delivery_failure
+            and not bool(st.get("notification_pending", False))
+        ):
+            dismiss_persistent_notification(NOTIFICATION_FALLBACK_ID)
+    else:
+        persistent_notification(
+            "Git Deployer Pushover delivery failed",
+            f"{title}\n\n{message}\n\nReview the Git Deployer app log.",
+            NOTIFICATION_FALLBACK_ID,
+        )
+    return success
+
+
+def notification_retry_due(
+    st: dict[str, Any], problem_key: str, now_ts: int
+) -> bool:
+    if st.get("last_notified_problem") == problem_key:
+        return False
+    pending_key = str(st.get("pending_notification_key") or "")
+    if pending_key != problem_key:
+        return True
+    return now_ts >= int(st.get("notification_retry_at") or 0)
+
+
+def send_problem_notification(
+    options: dict[str, Any],
+    st: dict[str, Any],
+    problem_key: str,
+    title: str,
+    message: str,
+    *,
+    priority: int = 0,
+    success_updates: dict[str, Any] | None = None,
+    now_ts: int | None = None,
+) -> bool:
+    if now_ts is None:
+        now_ts = int(time.time())
+    if not notification_retry_due(st, problem_key, now_ts):
+        return False
+
+    had_pending_delivery = (
+        bool(st.get("notification_pending", False))
+        and str(st.get("pending_notification_key") or "") == problem_key
+    )
+    success = bool(notify(options, title, message, priority=priority))
+    _record_notification_attempt(
+        st,
+        title=title,
+        success=success,
+        now_ts=now_ts,
+        error="Pushover service call failed; retry is pending.",
+    )
+    if success:
+        st.update(
+            {
+                "last_notified_problem": problem_key,
+                "notification_pending": False,
+                "notification_retry_at": 0,
+                "pending_notification_key": "",
+                "pending_notification_title": "",
+            }
+        )
+        if success_updates:
+            st.update(success_updates)
+    else:
+        st.update(
+            {
+                "notification_pending": True,
+                "notification_retry_at": now_ts + NOTIFICATION_RETRY_SECONDS,
+                "pending_notification_key": problem_key,
+                "pending_notification_title": title,
+            }
+        )
+
+    set_state(st)
+    publish_status(st)
+    if success:
+        if had_pending_delivery:
+            dismiss_persistent_notification(NOTIFICATION_FALLBACK_ID)
+    else:
+        persistent_notification(
+            "Git Deployer alert delivery pending",
+            f"{title}\n\n{message}\n\n"
+            "Remote delivery failed. The deployer will retry in 15 minutes "
+            "while this condition persists.",
+            NOTIFICATION_FALLBACK_ID,
+        )
+    return success
 
 
 def publish_status(st: dict[str, Any] | None = None) -> None:
@@ -565,6 +718,17 @@ def publish_status(st: dict[str, Any] | None = None) -> None:
         "last_fetch_result": str(st.get("last_fetch_result") or "unknown"),
         "last_fetch_error": str(st.get("last_fetch_error") or "")[:2000],
         "fetch_failure_started_at": int(st.get("fetch_failure_started_at") or 0),
+        "last_notification_at": int(st.get("last_notification_at") or 0),
+        "last_notification_result": str(
+            st.get("last_notification_result") or "unknown"
+        ),
+        "last_notification_title": str(st.get("last_notification_title") or ""),
+        "last_notification_error": str(st.get("last_notification_error") or "")[:2000],
+        "notification_pending": bool(st.get("notification_pending", False)),
+        "notification_retry_at": int(st.get("notification_retry_at") or 0),
+        "pending_notification_title": str(
+            st.get("pending_notification_title") or ""
+        ),
     }
 
     save_json_atomic(STATUS_FILE, payload)
@@ -576,6 +740,9 @@ def record_fetch_success(options: dict[str, Any], now_ts: int | None = None) -> 
         now_ts = int(time.time())
     st = state()
     was_notified = bool(st.get("fetch_failure_notified", False))
+    pending_fetch_notification = str(
+        st.get("pending_notification_key") or ""
+    ).startswith("fetch-failure:")
     st.update(
         {
             "last_poll_at": now_ts,
@@ -586,13 +753,25 @@ def record_fetch_success(options: dict[str, Any], now_ts: int | None = None) -> 
             "fetch_failure_notified": False,
         }
     )
+    if pending_fetch_notification:
+        st.update(
+            {
+                "notification_pending": False,
+                "notification_retry_at": 0,
+                "pending_notification_key": "",
+                "pending_notification_title": "",
+            }
+        )
     set_state(st)
     publish_status(st)
+    if pending_fetch_notification:
+        dismiss_persistent_notification(NOTIFICATION_FALLBACK_ID)
     if was_notified:
-        notify(
+        send_notification(
             options,
             "Git deployer repository access restored",
             "Repository access has recovered and deployment monitoring is active again.",
+            now_ts=now_ts,
         )
 
 
@@ -618,19 +797,21 @@ def record_fetch_failure(
             "fetch_failure_started_at": started_at,
         }
     )
+    set_state(st)
+    publish_status(st)
     if not notified and now_ts - started_at >= FETCH_FAILURE_ALERT_SECONDS:
-        notify(
+        send_problem_notification(
             options,
+            st,
+            f"fetch-failure:{started_at}",
             "Git deployer repository access problem",
             "Repository access has failed continuously for at least 30 minutes. "
             "No configuration updates can be detected until access recovers. "
             "Check the Git Deployer app log.",
             priority=1,
+            success_updates={"fetch_failure_notified": True},
+            now_ts=now_ts,
         )
-        st["fetch_failure_notified"] = True
-    set_state(st)
-    publish_status(st)
-
 
 def prune_rollbacks(keep: int = 5) -> None:
     if not ROLLBACK_ROOT.exists():
@@ -665,10 +846,14 @@ def bootstrap_if_needed(
         msg = f"Bootstrap commit does not exist locally: {bootstrap_sha}"
         LOG.error(msg)
         marker = "bootstrap-missing:" + bootstrap_sha
-        if st.get("last_notified_problem") != marker:
-            notify(options, "Git deploy bootstrap blocked", msg, priority=1)
-            st["last_notified_problem"] = marker
-            set_state(st)
+        send_problem_notification(
+            options,
+            st,
+            marker,
+            "Git deploy bootstrap blocked",
+            msg,
+            priority=1,
+        )
         return False
 
     if not is_ancestor(bootstrap_sha, target_sha):
@@ -679,10 +864,14 @@ def bootstrap_if_needed(
         )
         LOG.error(msg)
         marker = "bootstrap-ancestor:" + bootstrap_sha + ":" + target_sha
-        if st.get("last_notified_problem") != marker:
-            notify(options, "Git deploy bootstrap blocked", msg, priority=1)
-            st["last_notified_problem"] = marker
-            set_state(st)
+        send_problem_notification(
+            options,
+            st,
+            marker,
+            "Git deploy bootstrap blocked",
+            msg,
+            priority=1,
+        )
         return False
 
     matches, problems = initial_reconcile(bootstrap_sha, target_sha)
@@ -695,16 +884,15 @@ def bootstrap_if_needed(
         key = "bootstrap:" + hashlib.sha256(
             (bootstrap_sha + "\n" + "\n".join(problems)).encode()
         ).hexdigest()
-        if st.get("last_notified_problem") != key:
-            notify(
-                options,
-                "Git deployer needs reconciliation",
-                f"Production does not match bootstrap commit {bootstrap_sha[:12]} "
-                "or current target files. No files were changed. Check the app log.",
-                priority=1,
-            )
-            st["last_notified_problem"] = key
-            set_state(st)
+        send_problem_notification(
+            options,
+            st,
+            key,
+            "Git deployer needs reconciliation",
+            f"Production does not match bootstrap commit {bootstrap_sha[:12]} "
+            "or current target files. No files were changed. Check the app log.",
+            priority=1,
+        )
         return False
 
     st.update(
@@ -714,6 +902,10 @@ def bootstrap_if_needed(
             "initial_reconciled": True,
             "bootstrap_base_commit": bootstrap_sha,
             "last_notified_problem": None,
+            "notification_pending": False,
+            "notification_retry_at": 0,
+            "pending_notification_key": "",
+            "pending_notification_title": "",
         }
     )
     set_state(st)
@@ -724,7 +916,7 @@ def bootstrap_if_needed(
         bootstrap_sha,
         target_sha,
     )
-    notify(
+    send_notification(
         options,
         "Git deployer baseline established",
         f"Production is consistent with historical baseline {bootstrap_sha[:12]} "
@@ -783,7 +975,7 @@ def deploy_once(options: dict[str, Any], new_sha: str) -> None:
             LOG.info(
                 "Initial reconciliation succeeded. Baseline commit is %s", new_sha
             )
-            notify(
+            send_notification(
                 options,
                 "Git deployer ready",
                 f"Production matches GitHub baseline {new_sha[:12]}. "
@@ -794,19 +986,16 @@ def deploy_once(options: dict[str, Any], new_sha: str) -> None:
                 "Initial reconciliation failed; no files were changed:\n- %s",
                 "\n- ".join(problems),
             )
-            marker = st.get("last_notified_problem")
             key = "initial:" + sha256_bytes("\n".join(problems).encode())
-            if marker != key:
-                notify(
-                    options,
-                    "Git deployer needs reconciliation",
-                    "Initial production/GitHub comparison failed. No files were "
-                    "changed. Check the app log.",
-                    priority=1,
-                )
-                st["last_notified_problem"] = key
-                set_state(st)
-                publish_status(st)
+            send_problem_notification(
+                options,
+                st,
+                key,
+                "Git deployer needs reconciliation",
+                "Initial production/GitHub comparison failed. No files were "
+                "changed. Check the app log.",
+                priority=1,
+            )
         return
 
     if old_sha == new_sha:
@@ -818,11 +1007,14 @@ def deploy_once(options: dict[str, Any], new_sha: str) -> None:
             f"{old_sha[:12]} -> {new_sha[:12]}"
         )
         LOG.error(msg)
-        if st.get("last_notified_problem") != msg:
-            notify(options, "Git deploy blocked", msg, priority=1)
-            st["last_notified_problem"] = msg
-            set_state(st)
-            publish_status(st)
+        send_problem_notification(
+            options,
+            st,
+            msg,
+            "Git deploy blocked",
+            msg,
+            priority=1,
+        )
         return
 
     changes = diff_name_status(old_sha, new_sha)
@@ -855,11 +1047,14 @@ def deploy_once(options: dict[str, Any], new_sha: str) -> None:
         paths = ", ".join(path for _, path in forbidden)
         msg = f"Commit {new_sha[:12]} changes non-allowlisted path(s): {paths}"
         LOG.error(msg)
-        if st.get("last_notified_problem") != msg:
-            notify(options, "Git deploy blocked", msg, priority=1)
-            st["last_notified_problem"] = msg
-            set_state(st)
-            publish_status(st)
+        send_problem_notification(
+            options,
+            st,
+            msg,
+            "Git deploy blocked",
+            msg,
+            priority=1,
+        )
         return
 
     if not allowed:
@@ -868,6 +1063,10 @@ def deploy_once(options: dict[str, Any], new_sha: str) -> None:
                 "last_deployed_sha": new_sha,
                 "last_success_at": int(time.time()),
                 "last_notified_problem": None,
+                "notification_pending": False,
+                "notification_retry_at": 0,
+                "pending_notification_key": "",
+                "pending_notification_title": "",
             }
         )
         set_state(st)
@@ -891,35 +1090,31 @@ def deploy_once(options: dict[str, Any], new_sha: str) -> None:
             f"configuration.yaml and/or deletes a managed file. Changes: {changed}"
         )
         LOG.warning(msg)
-        if st.get("last_notified_problem") != msg:
-            notify(
-                options,
-                "Git deploy approval required",
-                "Sensitive commit pending.\n"
-                f"Full SHA: {new_sha}\n"
-                "Paste this full SHA into approved_sensitive_commit to authorize "
-                "this exact commit.",
-            )
-            st["last_notified_problem"] = msg
-            set_state(st)
-            publish_status(st)
+        send_problem_notification(
+            options,
+            st,
+            msg,
+            "Git deploy approval required",
+            "Sensitive commit pending.\n"
+            f"Full SHA: {new_sha}\n"
+            "Paste this full SHA into approved_sensitive_commit to authorize "
+            "this exact commit.",
+        )
         return
 
     drift = local_drift(allowed, old_sha, new_sha)
     if drift:
         msg = f"Local drift blocks commit {new_sha[:12]}: " + "; ".join(drift)
         LOG.error(msg)
-        if st.get("last_notified_problem") != msg:
-            notify(
-                options,
-                "Git deploy blocked by local drift",
-                f"Commit {new_sha[:12]} was not deployed because local managed "
-                "files differ from the last GitHub version. Check app logs.",
-                priority=1,
-            )
-            st["last_notified_problem"] = msg
-            set_state(st)
-            publish_status(st)
+        send_problem_notification(
+            options,
+            st,
+            msg,
+            "Git deploy blocked by local drift",
+            f"Commit {new_sha[:12]} was not deployed because local managed "
+            "files differ from the last GitHub version. Check app logs.",
+            priority=1,
+        )
         return
 
     backup_root = backup_changes(allowed, new_sha)
@@ -986,7 +1181,7 @@ def deploy_once(options: dict[str, Any], new_sha: str) -> None:
                 f"{err}. Rollback error: {rollback_err}"
             )
             LOG.critical("%s", critical_message)
-            notify(
+            send_notification(
                 options,
                 "Git deploy CRITICAL",
                 critical_message,
@@ -1018,7 +1213,7 @@ def deploy_once(options: dict[str, Any], new_sha: str) -> None:
 
         if rollback_valid:
             LOG.info("Rollback configuration check passed")
-            notify(
+            send_notification(
                 options,
                 "Git deploy rolled back",
                 f"Commit {new_sha[:12]} failed validation and was automatically "
@@ -1029,7 +1224,7 @@ def deploy_once(options: dict[str, Any], new_sha: str) -> None:
             LOG.critical(
                 "Rollback configuration check also failed: %s", rollback_errors
             )
-            notify(
+            send_notification(
                 options,
                 "Git deploy CRITICAL",
                 f"Commit {new_sha[:12]} failed and rollback validation also "
@@ -1054,6 +1249,10 @@ def deploy_once(options: dict[str, Any], new_sha: str) -> None:
             "last_deployed_sha": new_sha,
             "last_success_at": deployed_at,
             "last_notified_problem": None,
+            "notification_pending": False,
+            "notification_retry_at": 0,
+            "pending_notification_key": "",
+            "pending_notification_title": "",
             "last_code_deploy_at": deployed_at,
             "last_code_deploy_sha": new_sha,
             "last_changed_files": changed_files,
@@ -1082,7 +1281,7 @@ def deploy_once(options: dict[str, Any], new_sha: str) -> None:
     LOG.info(
         "Deployment %s passed Home Assistant configuration validation", new_sha
     )
-    notify(
+    send_notification(
         options,
         "Git deploy validated",
         f"Commit {new_sha[:12]} deployed and passed configuration validation. "

@@ -1,5 +1,6 @@
 # Home Automation Git Deployer
 
+<!-- Version history: 1.3.3 - 2026-08-29 - Documented confirmed-delivery deduplication, bounded Pushover retry, persistent fallback, and notification-health status fields. -->
 <!-- Version history: 1.3.2 - 2026-08-29 - Documented latched restart tracking and critical rollback-filesystem failure reporting with persistent notification fallback. -->
 <!-- Version history: 1.3.1 - 2026-08-27 - Clarified sensitive-approval guidance for the full copyable target SHA included in Pushover notifications. -->
 <!-- Version history: 1.3.0 - 2026-08-24 - Documented the flattened runtime, automated regression testing, and persistent repository-poll health/alert semantics. -->
@@ -79,8 +80,17 @@ Repository-health fields include:
 - `last_fetch_result`: `success`, `error`, or `unknown`.
 - `last_fetch_error`: most recent repository-access error, truncated to 2000 characters.
 - `fetch_failure_started_at`: beginning of the current continuous repository-access outage, or `0` while healthy.
+- `last_notification_at`: time of the most recent Pushover service attempt.
+- `last_notification_result`: `success`, `error`, or `unknown`.
+- `last_notification_title`: title of the most recent attempted remote notification.
+- `last_notification_error`: delivery failure summary, truncated to 2000 characters.
+- `notification_pending`: whether an ongoing blocking condition still needs confirmed remote delivery.
+- `notification_retry_at`: earliest time for the next bounded retry.
+- `pending_notification_title`: title of the pending alert.
 
-If repository access fails continuously for 30 minutes, the app sends one Pushover warning. Further failed polls during that same outage do not generate duplicate warnings. If the warning threshold was reached, the first successful repository fetch sends one recovery notification and clears the outage state.
+If repository access fails continuously for 30 minutes, the app attempts a Pushover warning. The outage is marked notified only after Home Assistant confirms that the notification service call succeeded. A failed attempt creates a local persistent-notification fallback and retries remote delivery every 15 minutes while the outage continues. If the warning was delivered, the first successful repository fetch sends one recovery notification and clears the outage state.
+
+The same confirmed-delivery rule applies to bootstrap, reconciliation, non-fast-forward, forbidden-path, sensitive-approval, and local-drift warnings. Failed delivery does not consume their deduplication marker. The local fallback is dismissed after a later successful remote attempt or when a pending repository-outage alert becomes obsolete after recovery.
 
 Repository-only commits do not update the last managed-code deployment timestamp. The status document is runtime state and is intentionally not managed by Git.
 
@@ -102,7 +112,7 @@ the critical mixed-version condition.
 
 Version 1.3.0 flattened the historical version-wrapper chain into one current `deployer.py`. Git history and `CHANGELOG.md` preserve earlier implementation history; the running add-on no longer imports prior-version Python modules.
 
-The source repository includes standard-library regression tests for the safety behavior that must remain stable, including path classification, target-aware reconciliation, local-drift refusal, non-fast-forward refusal, exact-SHA sensitive approval, repository-only commits, deletion/rollback behavior, validation failure handling, rollback escalation, restart-required classification, and repository-outage alert deduplication/recovery. Version 1.3.1 also verifies that sensitive-approval notifications expose the complete target SHA. Version 1.3.2 adds coverage for restart-latch preservation and rollback manifest-read, copy, unlink, and escalation failures. The private-source publishing workflow runs these tests before publishing the app to the public repository.
+The source repository includes standard-library regression tests for the safety behavior that must remain stable, including path classification, target-aware reconciliation, local-drift refusal, non-fast-forward refusal, exact-SHA sensitive approval, repository-only commits, deletion/rollback behavior, validation failure handling, rollback escalation, restart-required classification, and repository-outage alert deduplication/recovery. Version 1.3.1 also verifies that sensitive-approval notifications expose the complete target SHA. Version 1.3.2 adds coverage for restart-latch preservation and rollback manifest-read, copy, unlink, and escalation failures. Version 1.3.3 adds coverage for notification result reporting, delayed deduplication, bounded retry, and persistent fallback. The private-source publishing workflow runs these tests before publishing the app to the public repository.
 
 ## Activation
 

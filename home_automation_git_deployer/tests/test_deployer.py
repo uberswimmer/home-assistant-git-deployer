@@ -2,6 +2,7 @@
 # HOME AUTOMATION GIT DEPLOYER REGRESSION TESTS
 # =============================================================================
 # Version history:
+# 1.2.0 - 2026-08-29 - Added regression coverage for notification delivery results, pending deduplication, bounded retry, and Home Assistant fallback telemetry.
 # 1.1.0 - 2026-08-29 - Added regression coverage for latched restart requirements and rollback filesystem exceptions, including manifest-read, copy, and unlink failures.
 # 1.0.0 - 2026-08-24 - Added regression coverage for the v1.3.0 flattened deployer safety invariants, rollback behavior, reconciliation, and repository-health alerting.
 # =============================================================================
@@ -414,6 +415,115 @@ class GitDeployerTests(unittest.TestCase):
 
         self.assertTrue(result)
         self.assertEqual(deployer.state()["last_deployed_sha"], "basesha")
+
+    def test_notify_returns_false_when_service_call_fails(self) -> None:
+        with (
+            mock.patch.object(deployer, "ha_headers", return_value={}),
+            mock.patch.object(
+                deployer.requests,
+                "post",
+                side_effect=RuntimeError("service unavailable"),
+            ),
+        ):
+            self.assertFalse(
+                deployer.notify(self.options, "Test title", "Test message")
+            )
+
+    def test_problem_notification_retries_before_setting_dedupe_marker(self) -> None:
+        st: dict[str, object] = {}
+        with (
+            mock.patch.object(
+                deployer,
+                "notify",
+                side_effect=[False, True],
+            ) as notify_mock,
+            mock.patch.object(deployer, "persistent_notification") as persistent_mock,
+            mock.patch.object(
+                deployer, "dismiss_persistent_notification"
+            ) as dismiss_mock,
+        ):
+            self.assertFalse(
+                deployer.send_problem_notification(
+                    self.options,
+                    st,
+                    "problem:key",
+                    "Problem title",
+                    "Problem message",
+                    priority=1,
+                    now_ts=1000,
+                )
+            )
+            failed_state = deployer.state()
+            self.assertNotEqual(
+                failed_state.get("last_notified_problem"), "problem:key"
+            )
+            self.assertTrue(failed_state["notification_pending"])
+            self.assertEqual(failed_state["notification_retry_at"], 1900)
+            self.assertEqual(
+                deployer.load_json(deployer.STATUS_FILE, {})[
+                    "last_notification_result"
+                ],
+                "error",
+            )
+            persistent_mock.assert_called_once()
+
+            self.assertFalse(
+                deployer.send_problem_notification(
+                    self.options,
+                    failed_state,
+                    "problem:key",
+                    "Problem title",
+                    "Problem message",
+                    priority=1,
+                    now_ts=1899,
+                )
+            )
+            self.assertEqual(notify_mock.call_count, 1)
+
+            self.assertTrue(
+                deployer.send_problem_notification(
+                    self.options,
+                    failed_state,
+                    "problem:key",
+                    "Problem title",
+                    "Problem message",
+                    priority=1,
+                    now_ts=1900,
+                )
+            )
+            self.assertEqual(notify_mock.call_count, 2)
+            delivered_state = deployer.state()
+            self.assertEqual(
+                delivered_state["last_notified_problem"], "problem:key"
+            )
+            self.assertFalse(delivered_state["notification_pending"])
+            self.assertEqual(delivered_state["last_notification_result"], "success")
+            dismiss_mock.assert_called_once_with(
+                deployer.NOTIFICATION_FALLBACK_ID
+            )
+
+    def test_fetch_failure_alert_retries_after_delivery_failure(self) -> None:
+        with (
+            mock.patch.object(
+                deployer,
+                "notify",
+                side_effect=[False, True],
+            ) as notify_mock,
+            mock.patch.object(deployer, "persistent_notification"),
+            mock.patch.object(deployer, "dismiss_persistent_notification"),
+        ):
+            deployer.record_fetch_failure(self.options, "network down", now_ts=1000)
+            deployer.record_fetch_failure(self.options, "network down", now_ts=2800)
+            self.assertFalse(deployer.state().get("fetch_failure_notified", False))
+            deployer.record_fetch_failure(self.options, "network down", now_ts=3699)
+            self.assertEqual(notify_mock.call_count, 1)
+            deployer.record_fetch_failure(self.options, "network down", now_ts=3700)
+            self.assertEqual(notify_mock.call_count, 2)
+
+        state = deployer.state()
+        self.assertTrue(state["fetch_failure_notified"])
+        self.assertFalse(state["notification_pending"])
+        self.assertEqual(state["last_notification_result"], "success")
 
     def test_fetch_failure_alert_is_delayed_deduplicated_and_recovers(self) -> None:
         with mock.patch.object(deployer, "notify") as notify_mock:

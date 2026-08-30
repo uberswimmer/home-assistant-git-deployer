@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.3.3 - 2026-08-29
+
+- Returns explicit success or failure from Pushover service calls and records delivery health in the Home Assistant status document.
+- Sets problem deduplication markers only after confirmed notification success; failed alerts remain pending and retry every 15 minutes while the blocking condition persists.
+- Creates a Home Assistant persistent-notification fallback when Pushover delivery fails and dismisses it after successful remote delivery or recovery.
+- Adds regression coverage for delivery failure, bounded retry, delayed deduplication, and repository-outage alert recovery.
+
 ## 1.3.2 - 2026-08-29
 
 - Latches the timestamp and SHA of the most recent successful restart-requiring deployment so later dashboard-only, theme-only, or dashboard-component-only deployments cannot conceal a still-pending Home Assistant restart, including migration of the prior version's pending-restart state.
