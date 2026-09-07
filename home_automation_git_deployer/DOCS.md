@@ -1,5 +1,6 @@
 # Home Automation Git Deployer
 
+<!-- Version history: 1.3.4 - 2026-09-07 - Documented exact AGENTS.md metadata handling and app-upgrade recovery from a blocked configuration deployment. -->
 <!-- Version history: 1.3.3 - 2026-08-29 - Documented confirmed-delivery deduplication, bounded Pushover retry, persistent fallback, and notification-health status fields. -->
 <!-- Version history: 1.3.2 - 2026-08-29 - Documented latched restart tracking and critical rollback-filesystem failure reporting with persistent notification fallback. -->
 <!-- Version history: 1.3.1 - 2026-08-27 - Clarified sensitive-approval guidance for the full copyable target SHA included in Pushover notifications. -->
@@ -63,7 +64,7 @@ For `automations.yaml`, `scripts.yaml`, and `scenes.yaml`, blank, `[]`, `{}`, `n
 
 The deployer permits selected Home Assistant configuration content, including root dashboard YAML files, package YAML, theme YAML, and reusable Lovelace YAML under `dashboard_components/`.
 
-Repository metadata and development content under `docs/`, `hubitat/`, `local_apps/`, and `.github/` is ignored. Other unrecognized paths remain forbidden and block deployment until intentionally classified.
+The exact root files `README.md`, `AGENTS.md`, and `.gitignore`, plus repository metadata and development content under `docs/`, `hubitat/`, `local_apps/`, and `.github/`, are ignored and never copied into Home Assistant. Other unrecognized paths remain forbidden and block deployment until intentionally classified.
 
 ## Sensitive commit approval
 
@@ -129,3 +130,9 @@ https://github.com/uberswimmer/home-assistant-git-deployer
 The private `home-automation-config` repository remains the editable source of truth. Its publishing workflow copies approved Git Deployer source into the public repository automatically after changes reach `main` and the regression tests pass. Do not maintain a separate divergent implementation in the public repository.
 
 Once that repository has been added to the Home Assistant App Store, future versions can be installed through Home Assistant's normal app update interface rather than by copying files into `/addons` manually.
+
+### Recovering an AGENTS.md deployment block
+
+Versions through 1.3.3 reject a commit that changes root `AGENTS.md` before staging or copying configuration. Install app version 1.3.4 or later after refreshing the app repository, then confirm the running version in the startup log or deployer status. The next poll retries from the last successful deployment and applies the normal drift, sensitive-approval, validation, and rollback checks. Activate Home Assistant changes after deployment succeeds as indicated by the restart status.
+
+Merging changes under `local_apps/` publishes an app update; it does not upgrade the running app. Keep the existing deployment baseline and approval settings. Sensitive-commit approval cannot override a forbidden-path block.

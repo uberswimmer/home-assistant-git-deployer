@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.4 - 2026-09-07
+
+- Ignores the exact root `AGENTS.md` path as repository-only metadata; it is never copied into Home Assistant.
+- Adds regression coverage for metadata-only commits and a blocked mixed configuration commit retrying successfully after the app upgrade. Other unrecognized paths remain forbidden.
+- Install this app update in Home Assistant to resolve an `AGENTS.md` non-allowlisted-path block. Merging the source update alone does not update the running app. The next poll retries from the last successful deployment through the normal safety checks.
+
 ## 1.3.3 - 2026-08-29
 
 - Returns explicit success or failure from Pushover service calls and records delivery health in the Home Assistant status document.

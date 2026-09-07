@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 # =============================================================================
-# HOME AUTOMATION GIT DEPLOYER 1.3.3
+# HOME AUTOMATION GIT DEPLOYER 1.3.4
 # =============================================================================
 # Version history:
+# 1.3.4 - 2026-09-07 - Classified root AGENTS.md as repository-only metadata so instruction changes do not block managed configuration deployment.
 # 1.3.3 - 2026-08-29 - Made problem-alert deduplication contingent on confirmed Pushover service success, added bounded retry and persistent fallback, and published delivery health.
 # 1.3.2 - 2026-08-29 - Latched restart-requiring deployments across later dashboard-only commits and made rollback filesystem failures publish critical state with persistent notification fallback.
 # 1.3.1 - 2026-08-27 - Included the full target commit SHA in sensitive-approval notifications so the exact approval value is directly available to copy.
@@ -24,7 +25,7 @@ from typing import Any
 
 import requests
 
-VERSION = "1.3.3"
+VERSION = "1.3.4"
 FETCH_FAILURE_ALERT_SECONDS = 30 * 60
 NOTIFICATION_RETRY_SECONDS = 15 * 60
 NOTIFICATION_FALLBACK_ID = "git_deployer_notification_delivery_failed"
@@ -50,7 +51,7 @@ ROOT_ALLOWED = {
     "security_dashboard.yaml",
 }
 IGNORED_PREFIXES = ("docs/", "hubitat/", "local_apps/", ".github/")
-IGNORED_EXACT = {"README.md", ".gitignore"}
+IGNORED_EXACT = {"README.md", "AGENTS.md", ".gitignore"}
 EMPTY_YAML_REPRESENTATIONS = {b"", b"[]", b"{}", b"null", b"~"}
 EMPTY_UI_FILES = {"automations.yaml", "scripts.yaml", "scenes.yaml"}
 

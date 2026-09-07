@@ -2,6 +2,7 @@
 # HOME AUTOMATION GIT DEPLOYER REGRESSION TESTS
 # =============================================================================
 # Version history:
+# 1.3.0 - 2026-09-07 - Covered exact AGENTS.md metadata classification and retry of a blocked mixed configuration commit after an app upgrade.
 # 1.2.0 - 2026-08-29 - Added regression coverage for notification delivery results, pending deduplication, bounded retry, and Home Assistant fallback telemetry.
 # 1.1.0 - 2026-08-29 - Added regression coverage for latched restart requirements and rollback filesystem exceptions, including manifest-read, copy, and unlink failures.
 # 1.0.0 - 2026-08-24 - Added regression coverage for the v1.3.0 flattened deployer safety invariants, rollback behavior, reconciliation, and repository-health alerting.
@@ -86,6 +87,10 @@ class GitDeployerTests(unittest.TestCase):
         self.assertEqual(deployer.classify_path(".github/workflows/test.yml"), "ignored")
         self.assertEqual(deployer.classify_path("local_apps/tool/file.py"), "ignored")
         self.assertEqual(deployer.classify_path("secrets.yaml"), "forbidden")
+        self.assertEqual(deployer.classify_path("AGENTS.md"), "ignored")
+        for path in ("agents.md", "OTHER.md", "packages/AGENTS.md", "../AGENTS.md"):
+            with self.subTest(path=path):
+                self.assertEqual(deployer.classify_path(path), "forbidden")
 
     def test_empty_ui_yaml_representations_are_equivalent(self) -> None:
         self.assertTrue(deployer.content_matches("automations.yaml", b"[]\n", b"\n"))
@@ -190,7 +195,7 @@ class GitDeployerTests(unittest.TestCase):
 
     def test_repository_only_commit_advances_baseline_without_config_check(self) -> None:
         self.seed_state(last_code_deploy_sha="previous-code")
-        changes = [("M", "docs/readme.md")]
+        changes = [("M", "docs/readme.md"), ("M", "AGENTS.md")]
         with (
             mock.patch.object(deployer, "is_ancestor", return_value=True),
             mock.patch.object(deployer, "diff_name_status", return_value=changes),
@@ -202,6 +207,45 @@ class GitDeployerTests(unittest.TestCase):
         state = deployer.state()
         self.assertEqual(state["last_deployed_sha"], "newsha")
         self.assertEqual(state["last_code_deploy_sha"], "previous-code")
+
+    def test_app_upgrade_retries_blocked_agents_commit_without_copying_metadata(self) -> None:
+        self.seed_state()
+        target = self.ha_dir / "packages" / "a.yaml"
+        target.parent.mkdir(parents=True)
+        target.write_bytes(b"old\n")
+        changes = [("A", "AGENTS.md"), ("M", "packages/a.yaml")]
+
+        def file_bytes(commit: str, path: str) -> bytes:
+            self.assertEqual(path, "packages/a.yaml")
+            return b"old\n" if commit == "oldsha" else b"new\n"
+
+        with (
+            mock.patch.object(deployer, "is_ancestor", return_value=True),
+            mock.patch.object(deployer, "diff_name_status", return_value=changes),
+            mock.patch.object(deployer, "git_file_bytes", side_effect=file_bytes),
+            mock.patch.object(deployer, "check_config", return_value=(True, "")) as check_mock,
+            mock.patch.object(deployer, "notify", return_value=True),
+        ):
+            # Reproduce the installed pre-upgrade policy, then retry the same
+            # commit with the updated policy and the persisted blocked state.
+            with mock.patch.object(deployer, "IGNORED_EXACT", {"README.md", ".gitignore"}):
+                deployer.deploy_once(self.options, "newsha")
+            self.assertEqual(deployer.state()["last_deployed_sha"], "oldsha")
+            self.assertEqual(target.read_bytes(), b"old\n")
+            self.assertFalse(self.rollback_root.exists())
+            check_mock.assert_not_called()
+
+            deployer.deploy_once(self.options, "newsha")
+
+        check_mock.assert_called_once()
+        self.assertEqual(target.read_bytes(), b"new\n")
+        self.assertFalse((self.ha_dir / "AGENTS.md").exists())
+        state = deployer.state()
+        self.assertEqual(state["last_deployed_sha"], "newsha")
+        self.assertEqual(state["last_code_deploy_sha"], "newsha")
+        self.assertEqual(state["last_validation_result"], "valid")
+        self.assertTrue(state["restart_required"])
+        self.assertFalse(state["notification_pending"])
 
     def test_delete_apply_and_rollback_restore_original_file(self) -> None:
         target = self.ha_dir / "packages" / "a.yaml"
