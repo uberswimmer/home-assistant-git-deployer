@@ -136,3 +136,17 @@ Once that repository has been added to the Home Assistant App Store, future vers
 Versions through 1.3.3 reject a commit that changes root `AGENTS.md` before staging or copying configuration. Install app version 1.3.4 or later after refreshing the app repository, then confirm the running version in the startup log or deployer status. The next poll retries from the last successful deployment and applies the normal drift, sensitive-approval, validation, and rollback checks. Activate Home Assistant changes after deployment succeeds as indicated by the restart status.
 
 Merging changes under `local_apps/` publishes an app update; it does not upgrade the running app. Keep the existing deployment baseline and approval settings. Sensitive-commit approval cannot override a forbidden-path block.
+
+## DROP observation adapter deployment (1.4.0)
+
+Version 1.4.0 additionally manages exactly `__init__.py`, `manifest.json`,
+`evidence.py` and `sensor.py` under `custom_components/drop_observation/`.
+All changes to these files require approval of the exact target commit SHA and
+latch a Core restart requirement. Other custom integrations/Python files remain
+forbidden. The four files use the normal drift, baseline and rollback protections.
+
+Install the published 1.4.0 app before deploying a commit containing these paths.
+An older app blocks the commit; after upgrade it retries through the ordinary
+checks. Do not reset the baseline, manually copy around drift checks or treat a
+successful deployment as activation. Leave Water Protection commissioning disabled
+until the operator has completed the source's controlled live checks.

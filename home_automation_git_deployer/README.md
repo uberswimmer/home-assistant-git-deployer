@@ -21,3 +21,6 @@ A Home Assistant app for safely deploying selected YAML configuration from a Git
 - No write access to the managed configuration repository
 
 See `DOCS.md` for installation, configuration, and operating details.
+
+DROP observation adapter files require app 1.4.0 and exact-commit approval. See
+[the operator guide](DOCS.md#drop-observation-adapter-deployment-140).

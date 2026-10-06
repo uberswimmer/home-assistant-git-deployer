@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.4.0 - 2026-10-06
+
+- Manage exactly four files in `custom_components/drop_observation`: `__init__.py`,
+  `manifest.json`, `evidence.py` and `sensor.py`. Other custom integrations and
+  arbitrary Python files remain forbidden.
+- Include those files in drift/baseline/rollback handling, require exact target-SHA
+  approval for changes, and require a Core restart after deployment.
+- Install this app version before deploying a configuration commit containing
+  these paths. Publication does not install the app; no baseline reset is needed.
+
 ## 1.3.4 - 2026-09-07
 
 - Ignores the exact root `AGENTS.md` path as repository-only metadata; it is never copied into Home Assistant.

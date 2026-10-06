@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 # =============================================================================
-# HOME AUTOMATION GIT DEPLOYER 1.3.4
+# HOME AUTOMATION GIT DEPLOYER 1.4.0
 # =============================================================================
 # Version history:
+# 1.4.0 - 2026-10-06 - Manage four DROP observation integration files with exact-SHA approval.
 # 1.3.4 - 2026-09-07 - Classified root AGENTS.md as repository-only metadata so instruction changes do not block managed configuration deployment.
 # 1.3.3 - 2026-08-29 - Made problem-alert deduplication contingent on confirmed Pushover service success, added bounded retry and persistent fallback, and published delivery health.
 # 1.3.2 - 2026-08-29 - Latched restart-requiring deployments across later dashboard-only commits and made rollback filesystem failures publish critical state with persistent notification fallback.
@@ -25,7 +26,7 @@ from typing import Any
 
 import requests
 
-VERSION = "1.3.4"
+VERSION = "1.4.0"
 FETCH_FAILURE_ALERT_SECONDS = 30 * 60
 NOTIFICATION_RETRY_SECONDS = 15 * 60
 NOTIFICATION_FALLBACK_ID = "git_deployer_notification_delivery_failed"
@@ -49,6 +50,12 @@ ROOT_ALLOWED = {
     "comfort_dashboard.yaml",
     "iaq_dashboard.yaml",
     "security_dashboard.yaml",
+}
+DROP_OBSERVATION_FILES = {
+    "custom_components/drop_observation/__init__.py",
+    "custom_components/drop_observation/manifest.json",
+    "custom_components/drop_observation/evidence.py",
+    "custom_components/drop_observation/sensor.py",
 }
 IGNORED_PREFIXES = ("docs/", "hubitat/", "local_apps/", ".github/")
 IGNORED_EXACT = {"README.md", "AGENTS.md", ".gitignore"}
@@ -177,7 +184,7 @@ def content_matches(path: str, expected: bytes, actual: bytes) -> bool:
 
 def classify_path(path: str) -> str:
     p = PurePosixPath(path)
-    if path in ROOT_ALLOWED:
+    if path in ROOT_ALLOWED or path in DROP_OBSERVATION_FILES:
         return "allowed"
     if (
         len(p.parts) == 1
@@ -200,7 +207,7 @@ def classify_path(path: str) -> str:
 
 def managed_local_paths() -> set[str]:
     paths: set[str] = set()
-    for name in ROOT_ALLOWED:
+    for name in ROOT_ALLOWED | DROP_OBSERVATION_FILES:
         if (HA_DIR / name).exists():
             paths.add(name)
     for path in HA_DIR.glob("*_dashboard.yaml"):
@@ -1080,7 +1087,7 @@ def deploy_once(options: dict[str, Any], new_sha: str) -> None:
         return
 
     sensitive = any(
-        path == "configuration.yaml" or status_code == "D"
+        path == "configuration.yaml" or path in DROP_OBSERVATION_FILES or status_code == "D"
         for status_code, path in allowed
     )
     approved = str(options.get("approved_sensitive_commit", "")).strip()
@@ -1088,7 +1095,7 @@ def deploy_once(options: dict[str, Any], new_sha: str) -> None:
         changed = ", ".join(f"{status}:{path}" for status, path in allowed)
         msg = (
             f"Commit {new_sha} requires explicit approval because it changes "
-            f"configuration.yaml and/or deletes a managed file. Changes: {changed}"
+            f"configuration.yaml, approved integration code, and/or deletes a managed file. Changes: {changed}"
         )
         LOG.warning(msg)
         send_problem_notification(

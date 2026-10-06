@@ -2,6 +2,7 @@
 # HOME AUTOMATION GIT DEPLOYER REGRESSION TESTS
 # =============================================================================
 # Version history:
+# 1.4.0 - 2026-10-06 - Cover exact DROP integration paths, drift tracking and sensitive approvals.
 # 1.3.0 - 2026-09-07 - Covered exact AGENTS.md metadata classification and retry of a blocked mixed configuration commit after an app upgrade.
 # 1.2.0 - 2026-08-29 - Added regression coverage for notification delivery results, pending deduplication, bounded retry, and Home Assistant fallback telemetry.
 # 1.1.0 - 2026-08-29 - Added regression coverage for latched restart requirements and rollback filesystem exceptions, including manifest-read, copy, and unlink failures.
@@ -92,6 +93,21 @@ class GitDeployerTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertEqual(deployer.classify_path(path), "forbidden")
 
+    def test_drop_adapter_exact_allowlist_and_local_tracking(self):
+        for path in deployer.DROP_OBSERVATION_FILES:
+            self.assertEqual(deployer.classify_path(path), 'allowed')
+            f = deployer.HA_DIR / path
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text('test')
+            self.assertIn(path, deployer.managed_local_paths())
+            self.assertTrue(deployer.restart_required_for_paths([path]))
+        for path in ['custom_components/other/sensor.py',
+                     'custom_components/drop_observation/secrets.yaml',
+                     'custom_components/drop_observation/new.py',
+                     'custom_components/drop_observation/../sensor.py',
+                     'custom_components/drop_observation/__pycache__/sensor.pyc']:
+            self.assertEqual(deployer.classify_path(path), 'forbidden')
+
     def test_empty_ui_yaml_representations_are_equivalent(self) -> None:
         self.assertTrue(deployer.content_matches("automations.yaml", b"[]\n", b"\n"))
         self.assertTrue(deployer.content_matches("scenes.yaml", b"{}", b"null\n"))
@@ -176,6 +192,20 @@ class GitDeployerTests(unittest.TestCase):
         apply_mock.assert_not_called()
         self.assertEqual(deployer.state()["last_deployed_sha"], "oldsha")
         self.assertEqual(notify_mock.call_args.args[1], "Git deploy approval required")
+
+    def test_drop_adapter_change_requires_exact_sha_approval(self):
+        for path in deployer.DROP_OBSERVATION_FILES:
+            self.seed_state()
+            with (
+                mock.patch.object(deployer, "is_ancestor", return_value=True),
+                mock.patch.object(deployer, "diff_name_status", return_value=[("M", path)]),
+                mock.patch.object(deployer, "apply_changes") as apply_mock,
+                mock.patch.object(deployer, "notify") as notify_mock,
+            ):
+                deployer.deploy_once(self.options, "newsha")
+            apply_mock.assert_not_called()
+            self.assertEqual(deployer.state()["last_deployed_sha"], "oldsha")
+            self.assertEqual(notify_mock.call_args.args[1], "Git deploy approval required")
 
     def test_local_drift_blocks_managed_deployment(self) -> None:
         self.seed_state()
