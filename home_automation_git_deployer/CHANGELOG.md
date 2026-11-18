@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.4.1 - 2026-11-18
+
+- Deploy the Navien Home-policy Jinja file, track drift and require a Core restart when it changes. Install this version before rolling out the policy.
+
 ## 1.4.0 - 2026-10-06
 
 - Manage exactly four files in `custom_components/drop_observation`: `__init__.py`,

@@ -26,7 +26,7 @@ from typing import Any
 
 import requests
 
-VERSION = "1.4.0"
+VERSION = "1.4.1"
 FETCH_FAILURE_ALERT_SECONDS = 30 * 60
 NOTIFICATION_RETRY_SECONDS = 15 * 60
 NOTIFICATION_FALLBACK_ID = "git_deployer_notification_delivery_failed"
@@ -51,6 +51,7 @@ ROOT_ALLOWED = {
     "iaq_dashboard.yaml",
     "security_dashboard.yaml",
 }
+NAVIEN_POLICY = "custom_templates/navien_home_policy.jinja"
 DROP_OBSERVATION_FILES = {
     "custom_components/drop_observation/__init__.py",
     "custom_components/drop_observation/manifest.json",
@@ -184,7 +185,7 @@ def content_matches(path: str, expected: bytes, actual: bytes) -> bool:
 
 def classify_path(path: str) -> str:
     p = PurePosixPath(path)
-    if path in ROOT_ALLOWED or path in DROP_OBSERVATION_FILES:
+    if path in ROOT_ALLOWED or path in DROP_OBSERVATION_FILES or path == NAVIEN_POLICY:
         return "allowed"
     if (
         len(p.parts) == 1
@@ -207,7 +208,7 @@ def classify_path(path: str) -> str:
 
 def managed_local_paths() -> set[str]:
     paths: set[str] = set()
-    for name in ROOT_ALLOWED | DROP_OBSERVATION_FILES:
+    for name in ROOT_ALLOWED | DROP_OBSERVATION_FILES | {NAVIEN_POLICY}:
         if (HA_DIR / name).exists():
             paths.add(name)
     for path in HA_DIR.glob("*_dashboard.yaml"):

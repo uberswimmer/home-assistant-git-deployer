@@ -13,7 +13,7 @@ This Home Assistant app safely deploys selected YAML files from a Git repository
 - Repository access is read-only through a repository-scoped SSH deploy key.
 - The private SSH key is generated and retained in the app's private `/data` directory.
 - No network ports or ingress UI are exposed.
-- Only explicitly allowlisted Home Assistant YAML paths can be written.
+- Managed paths include the selected Home Assistant YAML files and the exact adapter and template paths documented below.
 - Local drift blocks deployment rather than being overwritten.
 - `configuration.yaml` changes and managed-file deletions require approval of the exact commit SHA.
 - A rollback copy is created before every deployment, and rollback filesystem
@@ -150,3 +150,7 @@ An older app blocks the commit; after upgrade it retries through the ordinary
 checks. Do not reset the baseline, manually copy around drift checks or treat a
 successful deployment as activation. Leave Water Protection commissioning disabled
 until the operator has completed the source's controlled live checks.
+
+## Navien Home policy template (1.4.1)
+
+Install app 1.4.1 or later before deploying `custom_templates/navien_home_policy.jinja` with the Navien package. The app includes this exact path in drift detection and rollback. Restart Core to load the deployed macro.
