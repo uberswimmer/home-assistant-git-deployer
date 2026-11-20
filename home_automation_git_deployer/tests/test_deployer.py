@@ -2,6 +2,7 @@
 # HOME AUTOMATION GIT DEPLOYER REGRESSION TESTS
 # =============================================================================
 # Version history:
+# 1.4.2 - 2026-11-20 - Cover exact school and Navien template deployment paths.
 # 1.4.0 - 2026-10-06 - Cover exact DROP integration paths, drift tracking and sensitive approvals.
 # 1.3.0 - 2026-09-07 - Covered exact AGENTS.md metadata classification and retry of a blocked mixed configuration commit after an app upgrade.
 # 1.2.0 - 2026-08-29 - Added regression coverage for notification delivery results, pending deduplication, bounded retry, and Home Assistant fallback telemetry.
@@ -79,15 +80,20 @@ class GitDeployerTests(unittest.TestCase):
         state.update(updates)
         deployer.set_state(state)
 
-    def test_navien_template_is_managed_by_exact_path(self):
-        policy = "custom_templates/navien_home_policy.jinja"
-        self.assertEqual(deployer.classify_path(policy), "allowed")
-        self.assertEqual(deployer.classify_path("custom_templates/other.jinja"), "forbidden")
-        self.assertTrue(deployer.restart_required_for_paths([policy]))
-        local = self.ha_dir / policy
-        local.parent.mkdir(parents=True)
-        local.write_text("template")
-        self.assertIn(policy, deployer.managed_local_paths())
+    def test_custom_templates_are_managed_by_exact_path(self):
+        for policy in ("custom_templates/navien_home_policy.jinja",
+                       "custom_templates/school_calendar.jinja"):
+            with self.subTest(policy=policy):
+                self.assertEqual(deployer.classify_path(policy), "allowed")
+                self.assertTrue(deployer.restart_required_for_paths([policy]))
+                local = self.ha_dir / policy
+                local.parent.mkdir(exist_ok=True)
+                local.write_text("template")
+                self.assertIn(policy, deployer.managed_local_paths())
+        other = "custom_templates/other.jinja"
+        (self.ha_dir / other).write_text("unmanaged")
+        self.assertEqual(deployer.classify_path(other), "forbidden")
+        self.assertNotIn(other, deployer.managed_local_paths())
 
     def test_path_classification_preserves_allowlist_and_ignored_metadata(self) -> None:
         self.assertEqual(deployer.classify_path("configuration.yaml"), "allowed")

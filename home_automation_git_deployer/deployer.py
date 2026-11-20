@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 # =============================================================================
-# HOME AUTOMATION GIT DEPLOYER 1.4.0
+# HOME AUTOMATION GIT DEPLOYER 1.4.2
 # =============================================================================
 # Version history:
+# 1.4.2 - 2026-11-20 - Manage the shared school-calendar template alongside its consumers.
+# 1.4.1 - 2026-11-18 - Manage the Navien Home policy template.
 # 1.4.0 - 2026-10-06 - Manage four DROP observation integration files with exact-SHA approval.
 # 1.3.4 - 2026-09-07 - Classified root AGENTS.md as repository-only metadata so instruction changes do not block managed configuration deployment.
 # 1.3.3 - 2026-08-29 - Made problem-alert deduplication contingent on confirmed Pushover service success, added bounded retry and persistent fallback, and published delivery health.
@@ -26,7 +28,7 @@ from typing import Any
 
 import requests
 
-VERSION = "1.4.1"
+VERSION = "1.4.2"
 FETCH_FAILURE_ALERT_SECONDS = 30 * 60
 NOTIFICATION_RETRY_SECONDS = 15 * 60
 NOTIFICATION_FALLBACK_ID = "git_deployer_notification_delivery_failed"
@@ -51,7 +53,10 @@ ROOT_ALLOWED = {
     "iaq_dashboard.yaml",
     "security_dashboard.yaml",
 }
-NAVIEN_POLICY = "custom_templates/navien_home_policy.jinja"
+POLICY_TEMPLATES = {
+    "custom_templates/navien_home_policy.jinja",
+    "custom_templates/school_calendar.jinja",
+}
 DROP_OBSERVATION_FILES = {
     "custom_components/drop_observation/__init__.py",
     "custom_components/drop_observation/manifest.json",
@@ -185,7 +190,7 @@ def content_matches(path: str, expected: bytes, actual: bytes) -> bool:
 
 def classify_path(path: str) -> str:
     p = PurePosixPath(path)
-    if path in ROOT_ALLOWED or path in DROP_OBSERVATION_FILES or path == NAVIEN_POLICY:
+    if path in ROOT_ALLOWED or path in DROP_OBSERVATION_FILES or path in POLICY_TEMPLATES:
         return "allowed"
     if (
         len(p.parts) == 1
@@ -208,7 +213,7 @@ def classify_path(path: str) -> str:
 
 def managed_local_paths() -> set[str]:
     paths: set[str] = set()
-    for name in ROOT_ALLOWED | DROP_OBSERVATION_FILES | {NAVIEN_POLICY}:
+    for name in ROOT_ALLOWED | DROP_OBSERVATION_FILES | POLICY_TEMPLATES:
         if (HA_DIR / name).exists():
             paths.add(name)
     for path in HA_DIR.glob("*_dashboard.yaml"):

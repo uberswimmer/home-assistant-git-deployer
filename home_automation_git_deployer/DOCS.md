@@ -154,3 +154,10 @@ until the operator has completed the source's controlled live checks.
 ## Navien Home policy template (1.4.1)
 
 Install app 1.4.1 or later before deploying `custom_templates/navien_home_policy.jinja` with the Navien package. The app includes this exact path in drift detection and rollback. Restart Core to load the deployed macro.
+
+## School wake calendar template (1.4.2)
+
+Install the published app version 1.4.2 or later and confirm the running version
+in the startup log before deploying `custom_templates/school_calendar.jinja`.
+Deploy it with both school wake packages, check configuration, then restart Core
+to load the macro and automations together. Drift and rollback include the new path.
